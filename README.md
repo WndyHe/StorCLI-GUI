@@ -13,6 +13,8 @@ Download a StorCLI version compatible with your controller and place
 
 - Controller overview with health, firmware, hardware and resource summaries.
 - Localized controller detail view with searchable properties and raw JSON.
+- Live virtual-drive and physical-drive background-operation progress bars with
+  10-second refresh and an MSM-style **More Details** view.
 - MSM-style **Modify Drive Group** support with RAID migration, member-drive
   addition, disk-count-aware RAID choices and capacity expansion.
 - Physical drive actions: locate, rebuild, state changes, hot spare, SMART,

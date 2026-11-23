@@ -21,7 +21,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_TITLE = "StorCLI GUI"
-APP_VERSION = "1.5.8"
+APP_VERSION = "1.5.9"
 MONO_FONT = ("Consolas", 10)
 UI_FONT = ("Microsoft YaHei UI", 9)
 DANGER_COLOR = "#c62828"
@@ -171,6 +171,231 @@ def controller_health_tag(text):
            ("optimal", "ok", "normal", "healthy", "online")):
         return "good"
     return ""
+
+
+BACKGROUND_OPERATION_CN = {
+    "rebuild": "重建",
+    "copyback": "回拷",
+    "init": "初始化",
+    "migrate": "RAID 迁移",
+    "bgi": "后台初始化 (BGI)",
+    "cc": "一致性检查 (CC)",
+    "patrolread": "巡检读取",
+    "erase": "擦除",
+    "busy": "后台操作进行中",
+}
+
+
+def normalized_field(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def row_value(row, *names):
+    wanted = {normalized_field(name) for name in names}
+    for key, value in (row or {}).items():
+        if normalized_field(key) in wanted:
+            return value
+    return None
+
+
+def parse_percentage(value):
+    """Return a 0-100 percentage from StorCLI's numeric/string progress fields."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text or text.casefold() in ("-", "n/a", "na", "none"):
+        return None
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*%", text)
+    if match:
+        number = float(match.group(1))
+    elif re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        number = float(text)
+    else:
+        return None
+    if not 0 <= number <= 100:
+        return None
+    return round(number, 1)
+
+
+def row_percentage(row):
+    for key, value in (row or {}).items():
+        field = normalized_field(key)
+        if any(word in field for word in
+               ("progress", "percent", "completion", "activeoperation")):
+            percentage = parse_percentage(value)
+            if percentage is not None:
+                return percentage
+    for key in ("State", "Status", "Active Operations"):
+        value = row_value(row, key)
+        if value is not None and "%" in str(value):
+            percentage = parse_percentage(value)
+            if percentage is not None:
+                return percentage
+    return None
+
+
+def background_operation_from_state(value):
+    low = str(value or "").strip().casefold()
+    if not low:
+        return "", ""
+    if any(word in low for word in
+           ("cpybck", "copyback", "copy back", "copy-b")):
+        code = "copyback"
+    elif any(word in low for word in ("rbld", "rebuild", "reconstruct")):
+        code = "rebuild"
+    elif "init" in low:
+        code = "init"
+    elif any(word in low for word in ("recfg", "migrat")):
+        code = "migrate"
+    elif re.search(r"(?:^|[^a-z])cc(?:[^a-z]|$)", low) or "consistency" in low:
+        code = "cc"
+    elif re.search(r"(?:^|[^a-z])bgi(?:[^a-z]|$)", low) or "background init" in low:
+        code = "bgi"
+    elif "patrol" in low:
+        code = "patrolread"
+    elif any(word in low for word in ("erase", "sntze", "sanitiz")):
+        code = "erase"
+    elif tag_for_state(low) == "orange":
+        code = "busy"
+    else:
+        return "", ""
+    return code, BACKGROUND_OPERATION_CN.get(code, tr_state(value) or "后台操作")
+
+
+def _vd_index_from_row(row):
+    direct = row_value(row, "VD")
+    if direct is not None:
+        match = re.search(r"\d+", str(direct))
+        if match:
+            return int(match.group(0))
+    dg_vd = str(row_value(row, "DG/VD", "DG") or "")
+    if "/" in dg_vd:
+        dg_vd = dg_vd.rsplit("/", 1)[-1]
+    match = re.search(r"\d+", dg_vd)
+    return int(match.group(0)) if match else None
+
+
+def _drive_address_from_row(row):
+    drive_id = row_value(row, "Drive-ID", "DID")
+    eid = row_value(row, "EID", "Enclosure", "Encl")
+    slot = row_value(row, "Slt", "Slot", "SLOT")
+    if drive_id is not None:
+        match = re.search(r"(\d+)\s*:\s*(\d+)", str(drive_id))
+        if match:
+            return match.group(1), match.group(2)
+    combined = row_value(row, "EID:Slt", "EID:Slot")
+    if combined is not None:
+        match = re.search(r"(\d+)\s*:\s*(\d+)", str(combined))
+        if match:
+            return match.group(1), match.group(2)
+    if eid is not None and slot is not None:
+        eid_text = re.search(r"\d+", str(eid))
+        slot_text = re.search(r"\d+", str(slot))
+        if eid_text and slot_text:
+            return eid_text.group(0), slot_text.group(0)
+    return None
+
+
+def background_operation_entry(row, kind, default_code=""):
+    state = str(row_value(row, "State", "Operation State") or "").strip()
+    explicit_operation = str(row_value(row, "Operation") or "").strip()
+    state_code, state_label = background_operation_from_state(state)
+    explicit_code, explicit_label = background_operation_from_state(explicit_operation)
+    code = explicit_code or state_code or default_code
+    status = str(row_value(row, "Status", "Operation Status") or "").strip()
+    progress = row_percentage(row)
+    status_low = status.casefold()
+    if status_low in ("not in progress", "completed", "complete"):
+        return None
+    inactive = status_low in ("", "-", "not in progress", "completed", "complete")
+    active = bool(explicit_code or state_code)
+    if status_low in ("in progress", "paused", "running", "rebuilding",
+                      "copying back", "initializing"):
+        active = True
+    if progress is not None and not inactive:
+        active = True
+    if not active:
+        return None
+
+    if kind == "vd":
+        index = _vd_index_from_row(row)
+        key = f"vd:{index}" if index is not None else "vd:unknown"
+        dg_vd = str(row_value(row, "DG/VD") or "").strip()
+        target = f"DG {dg_vd}" if "/" in dg_vd else (
+            f"VD {index}" if index is not None else "虚拟盘")
+        if dg_vd and "/" in dg_vd:
+            dg, vd = dg_vd.split("/", 1)
+            target = f"DG {dg.strip()} / VD {vd.strip()}"
+        elif index is not None and not target.startswith("VD"):
+            target = f"VD {index}"
+    else:
+        address = _drive_address_from_row(row)
+        if address:
+            eid, slot = address
+            key = f"pd:{eid}:{slot}"
+            target = f"背板 {eid} / 槽位 {slot}"
+        else:
+            drive_id = row_value(row, "Drive-ID")
+            key = f"pd:{drive_id or 'unknown'}"
+            target = f"物理盘 {drive_id}" if drive_id else "物理盘"
+
+    label = explicit_label or state_label
+    if not label:
+        label = BACKGROUND_OPERATION_CN.get(code, tr_state(state) or "后台操作")
+    details = []
+    for field, caption in (
+            ("TYPE", "RAID"), ("DG", "DG"), ("Size", "容量"),
+            ("Model", "型号"), ("SN", "序列号"), ("State", "状态")):
+        value = row_value(row, field)
+        if value is not None and str(value).strip() not in ("", "-"):
+            details.append(f"{caption}: {tr_state(fmt_cell(value))}")
+    eta = str(row_value(row, "Estimated Time Left", "Time Left", "ETA") or "").strip()
+    if status and status.casefold() not in ("in progress", "not in progress"):
+        details.append(f"状态: {tr_state(status)}")
+    return {
+        "kind": kind,
+        "key": key,
+        "target": target,
+        "code": code,
+        "operation": label,
+        "progress": progress,
+        "status": tr_state(status or "In progress"),
+        "eta": eta if eta != "-" else "",
+        "state": tr_state(state) if state else "",
+        "detail": " · ".join(details),
+    }
+
+
+def build_background_operations(vd_rows, pd_rows):
+    entries = {}
+    for kind, rows in (("vd", vd_rows or []), ("pd", pd_rows or [])):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            entry = background_operation_entry(row, kind)
+            if entry:
+                entries[entry["key"]] = entry
+    return sorted(
+        entries.values(),
+        key=lambda item: (0 if item["kind"] == "vd" else 1,
+                          item["target"].casefold()))
+
+
+def operation_rows_from_payload(payload):
+    rows = []
+    try:
+        response = payload["Controllers"][0].get("Response Data", {}) or {}
+    except (KeyError, IndexError, TypeError):
+        return rows
+    for _title, _headers, table in iter_tables(response):
+        for row in table:
+            if not isinstance(row, dict):
+                continue
+            fields = {normalized_field(key) for key in row}
+            if fields & {"progress", "progresspercent", "status", "operation",
+                         "driveid", "vd", "estimatedtimeleft"}:
+                rows.append(row)
+    return rows
 
 
 # ---------------------------------------------------------------- 中文翻译
@@ -3072,6 +3297,147 @@ class ModifyDriveGroupDialog(tk.Toplevel):
             self.destroy()
 
 
+class BackgroundOperationsDialog(tk.Toplevel):
+    """Detailed MSM-style view of current virtual-drive and physical-drive work."""
+
+    def __init__(self, owner, ctrl):
+        super().__init__(owner.app.root)
+        self.owner = owner
+        self.ctrl = ctrl
+        self.title(f"后台操作详情 - 控制器 {ctrl}")
+        self.geometry("900x500")
+        self.minsize(720, 380)
+        self.transient(owner.app.root)
+        self.protocol("WM_DELETE_WINDOW", self.close)
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=12, pady=(12, 6))
+        self.summary_var = tk.StringVar(value="正在读取后台操作...")
+        ttk.Label(
+            top, textvariable=self.summary_var,
+            font=(UI_FONT[0], UI_FONT[1] + 1, "bold")).pack(side="left")
+        ttk.Button(
+            top, text="立即刷新",
+            command=lambda: owner.refresh_background(
+                manual=True, details=self)).pack(side="right")
+
+        table = ttk.Frame(self)
+        table.pack(fill="both", expand=True, padx=12, pady=6)
+        columns = ("kind", "target", "operation", "progress", "status", "eta")
+        self.tree = ttk.Treeview(
+            table, columns=columns, show="headings", selectmode="browse")
+        vsb = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        headings = {
+            "kind": ("类别", 90),
+            "target": ("目标", 180),
+            "operation": ("操作", 170),
+            "progress": ("进度", 80),
+            "status": ("状态", 110),
+            "eta": ("预计剩余", 140),
+        }
+        for column, (text, width) in headings.items():
+            self.tree.heading(column, text=text)
+            self.tree.column(column, width=width, minwidth=70, anchor="w")
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+
+        self.detail_var = tk.StringVar(
+            value="选择一项操作可查看 RAID、容量、型号和原始状态等详细信息。")
+        ttk.Label(
+            self, textvariable=self.detail_var, foreground="#555",
+            wraplength=850, justify="left").pack(
+                fill="x", padx=12, pady=(2, 4))
+        self.note_var = tk.StringVar(value="进度每 10 秒自动刷新。")
+        ttk.Label(
+            self, textvariable=self.note_var,
+            foreground="#666").pack(anchor="w", padx=12)
+
+        bottom = ttk.Frame(self)
+        bottom.pack(fill="x", padx=12, pady=12)
+        ttk.Label(
+            bottom, text="数据来源: storcli64 /cx show all J",
+            foreground="#777").pack(side="left")
+        ttk.Button(
+            bottom, text="关闭", command=self.close).pack(side="right")
+        self.entries = []
+
+    def update_snapshot(self, entries, updated="", error=""):
+        if not self.winfo_exists():
+            return
+        selected = self.tree.selection()
+        selected_key = selected[0] if selected else ""
+        self.entries = list(entries or [])
+        self.tree.delete(*self.tree.get_children())
+        vd_count = 0
+        pd_count = 0
+        for entry in self.entries:
+            kind_text = "虚拟盘" if entry["kind"] == "vd" else "物理盘"
+            if entry["kind"] == "vd":
+                vd_count += 1
+            else:
+                pd_count += 1
+            progress = (
+                f"{entry['progress']:g}%"
+                if entry.get("progress") is not None else "--")
+            self.tree.insert(
+                "", "end", iid=entry["key"],
+                values=(kind_text, entry["target"], entry["operation"],
+                        progress, entry["status"], entry.get("eta") or "--"))
+        self.summary_var.set(
+            f"控制器 {self.ctrl} · 虚拟盘 {vd_count} 项 · 物理盘 {pd_count} 项")
+        if error:
+            self.note_var.set(f"{error} · 上次更新: {updated or '--'}")
+        elif updated:
+            self.note_var.set(
+                f"上次更新: {updated} · 每 10 秒自动刷新 · 共 {len(self.entries)} 项")
+        else:
+            self.note_var.set("进度每 10 秒自动刷新。")
+        if selected_key and self.tree.exists(selected_key):
+            self.tree.selection_set(selected_key)
+            self.tree.focus(selected_key)
+        elif self.entries:
+            first = self.entries[0]["key"]
+            self.tree.selection_set(first)
+            self.tree.focus(first)
+        else:
+            self.detail_var.set("当前没有正在进行的虚拟盘或物理盘后台操作。")
+
+    def on_select(self, _event=None):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        key = selected[0]
+        entry = next((item for item in self.entries if item["key"] == key), None)
+        if not entry:
+            return
+        parts = [
+            f"{entry['target']} · {entry['operation']}",
+            f"进度: {entry['progress']:g}%" if entry.get("progress") is not None
+            else "进度: 暂未提供",
+            f"状态: {entry['status']}",
+        ]
+        if entry.get("eta"):
+            parts.append(f"预计剩余: {entry['eta']}")
+        if entry.get("detail"):
+            parts.append(entry["detail"])
+        self.detail_var.set(" · ".join(parts))
+
+    def set_busy(self, text):
+        if self.winfo_exists():
+            self.note_var.set(text)
+
+    def close(self):
+        if self.owner.bg_details_window is self:
+            self.owner.bg_details_window = None
+        self.destroy()
+
+
 class OverviewTab:
     """概览页: MSM 主界面风格的仪表盘 + 物理盘/背板表, 可切换原始输出."""
 
@@ -3085,6 +3451,17 @@ class OverviewTab:
         self._rd = None
         self.loaded_ctrl = None
         self._load_seq = 0
+        self._bg_vd_rows = []
+        self._bg_pd_rows = []
+        self._bg_snapshot = []
+        self._bg_updated = ""
+        self._bg_load_seq = 0
+        self._bg_inflight = False
+        self._bg_progress_pending = 0
+        self._bg_progress_requested = set()
+        self._bg_animation = {"vd": False, "pd": False}
+        self._bg_refresh_job = None
+        self.bg_details_window = None
         self.frame = ttk.Frame(parent)
         bar = ttk.Frame(self.frame)
         bar.pack(fill="x", padx=6, pady=6)
@@ -3130,9 +3507,32 @@ class OverviewTab:
         bf = ttk.LabelFrame(self.dash, text="后台操作")
         bf.grid(row=0, column=2, sticky="nsew", padx=(3, 0), pady=(0, 6))
         self.bg_vd_lbl = ttk.Label(bf, text="虚拟盘进行中操作: -", font=UI_FONT)
-        self.bg_vd_lbl.pack(anchor="w", padx=10, pady=8)
+        self.bg_vd_lbl.pack(anchor="w", padx=10, pady=(8, 2))
+        self.bg_vd_bar = ttk.Progressbar(
+            bf, orient="horizontal", mode="determinate",
+            maximum=100, value=0)
+        self.bg_vd_bar.pack(fill="x", padx=12, pady=(0, 2))
+        self.bg_vd_note = ttk.Label(
+            bf, text="暂无后台操作", foreground="#666",
+            font=(UI_FONT[0], UI_FONT[1] - 1))
+        self.bg_vd_note.pack(anchor="w", padx=12, pady=(0, 6))
         self.bg_pd_lbl = ttk.Label(bf, text="物理盘进行中操作: -", font=UI_FONT)
-        self.bg_pd_lbl.pack(anchor="w", padx=10, pady=8)
+        self.bg_pd_lbl.pack(anchor="w", padx=10, pady=(2, 2))
+        self.bg_pd_bar = ttk.Progressbar(
+            bf, orient="horizontal", mode="determinate",
+            maximum=100, value=0)
+        self.bg_pd_bar.pack(fill="x", padx=12, pady=(0, 2))
+        self.bg_pd_note = ttk.Label(
+            bf, text="暂无后台操作", foreground="#666",
+            font=(UI_FONT[0], UI_FONT[1] - 1))
+        self.bg_pd_note.pack(anchor="w", padx=12, pady=(0, 4))
+        self.bg_more_btn = tk.Button(
+            bf, text="More Details", command=self.show_bg_details,
+            relief="flat", borderwidth=0, background=WINDOW_BG,
+            foreground="#1565c0", activebackground=HOVER_BG,
+            activeforeground="#1565c0", cursor="hand2",
+            font=(UI_FONT[0], UI_FONT[1], "underline"))
+        self.bg_more_btn.pack(anchor="w", padx=10, pady=(2, 8))
 
         af = ttk.LabelFrame(self.dash, text="高级软件选项")
         af.grid(row=1, column=0, sticky="nsew", padx=(0, 3), pady=(0, 6))
@@ -3176,6 +3576,7 @@ class OverviewTab:
 
         self.text_frame, self.text = build_text(self.frame)
         self.text_frame.pack_forget()
+        self._bg_refresh_job = self.app.root.after(10000, self._background_tick)
 
     def load(self):
         if self.app.current_ctrl is None:
@@ -3183,6 +3584,12 @@ class OverviewTab:
             return
         ctrl = self.app.current_ctrl
         if self.loaded_ctrl != ctrl:
+            try:
+                if (self.bg_details_window is not None
+                        and self.bg_details_window.ctrl != ctrl):
+                    self.bg_details_window.close()
+            except tk.TclError:
+                self.bg_details_window = None
             self.loaded_ctrl = ctrl
             self._rd = None
             self.raw_text = ""
@@ -3195,8 +3602,13 @@ class OverviewTab:
             self.cap_total_lbl.config(text="总容量: -")
             self.cap_cfg_lbl.config(text="已配置: -")
             self.cap_unc_lbl.config(text="未配置: -")
-            self.bg_vd_lbl.config(text="虚拟盘进行中操作: -")
-            self.bg_pd_lbl.config(text="物理盘进行中操作: -")
+            self._bg_vd_rows = []
+            self._bg_pd_rows = []
+            self._bg_snapshot = []
+            self._bg_updated = ""
+            self._bg_progress_requested = set()
+            self.refresh_background_ui()
+            self.update_bg_details()
             self.aso_text.config(state="normal")
             self.aso_text.delete("1.0", "end")
             self.aso_text.config(state="disabled")
@@ -3246,7 +3658,7 @@ class OverviewTab:
         self._rd = rd
         self.update_props(rd)
         self.update_usage(rd)
-        self.update_bg_pd(rd)
+        self.apply_background_rd(rd, request_progress=True)
         self.update_aso(rd)
         self.render_kv(rd)
         tables = []
@@ -3324,17 +3736,13 @@ class OverviewTab:
             c.create_arc(x0, y0, x1, y1, start=90, extent=-ext, fill="#1565c0", outline="")
         c.create_text(70, 134, text=f"已配置 {int(round(100.0 * cfg / total))}%", font=UI_FONT)
 
-    def update_bg_pd(self, rd):
-        pds = rd.get("PD LIST")
-        pds = pds if isinstance(pds, list) else []
-        busy = sum(1 for row in pds
-                   if tag_for_state(str(row.get("State", ""))) == "orange")
-        self.bg_pd_lbl.config(text=f"物理盘进行中操作 (重建/初始化等): {busy}")
-
     def on_vd(self, res):
         if not res.get("ok"):
             self.prop_labels["vd"].config(text="-")
-            self.bg_vd_lbl.config(text="虚拟盘进行中操作: -")
+            self._bg_vd_rows = []
+            self.rebuild_background_snapshot()
+            self.refresh_background_ui()
+            self.update_bg_details()
             return
         try:
             payload = parse_json_output(res["stdout"])
@@ -3346,9 +3754,268 @@ class OverviewTab:
             vds = rd.get("Virtual Drives")
         vds = vds if isinstance(vds, list) else []
         self.prop_labels["vd"].config(text=str(len(vds)))
-        busy = sum(1 for row in vds
-                   if tag_for_state(str(row.get("State", ""))) == "orange")
-        self.bg_vd_lbl.config(text=f"虚拟盘进行中操作 (初始化/回拷等): {busy}")
+        self._bg_vd_rows = vds
+        self.rebuild_background_snapshot()
+        self.refresh_background_ui()
+        self.update_bg_details()
+
+    def apply_background_rd(self, rd, request_progress=False):
+        vds = rd.get("VD LIST")
+        if not isinstance(vds, list):
+            vds = rd.get("Virtual Drives")
+        if isinstance(vds, list):
+            self._bg_vd_rows = vds
+        pds = rd.get("PD LIST")
+        if not isinstance(pds, list):
+            pds = rd.get("Physical Drives")
+        if isinstance(pds, list):
+            self._bg_pd_rows = pds
+        self.rebuild_background_snapshot()
+        self._bg_updated = time.strftime("%H:%M:%S")
+        self.refresh_background_ui()
+        self.update_bg_details()
+        if request_progress:
+            self._bg_progress_requested = set()
+            self.request_background_progress()
+
+    def rebuild_background_snapshot(self):
+        previous = {item["key"]: item for item in self._bg_snapshot}
+        entries = build_background_operations(
+            self._bg_vd_rows, self._bg_pd_rows)
+        for entry in entries:
+            old = previous.get(entry["key"])
+            if old and old.get("progress") is not None:
+                entry["progress"] = old["progress"]
+                entry["status"] = old.get("status", entry["status"])
+                entry["eta"] = old.get("eta", entry["eta"])
+        self._bg_snapshot = entries
+
+    def refresh_background_ui(self):
+        vd_entries = [item for item in self._bg_snapshot if item["kind"] == "vd"]
+        pd_entries = [item for item in self._bg_snapshot if item["kind"] == "pd"]
+        self._update_background_group("vd", self.bg_vd_lbl, self.bg_vd_bar,
+                                      self.bg_vd_note, vd_entries)
+        self._update_background_group("pd", self.bg_pd_lbl, self.bg_pd_bar,
+                                      self.bg_pd_note, pd_entries)
+
+    def _update_background_group(self, kind, label, bar, note, entries):
+        caption = "虚拟盘进行中操作" if kind == "vd" else "物理盘进行中操作"
+        count = len(entries)
+        label.config(text=f"{caption}: {count}")
+        known = [item["progress"] for item in entries
+                 if item.get("progress") is not None]
+        if not entries:
+            bar.stop()
+            self._bg_animation[kind] = False
+            bar.configure(mode="determinate", value=0)
+            note.config(
+                text=("当前无后台操作 · 10 秒自动刷新"
+                      if self._bg_updated else "暂无后台操作"),
+                foreground="#666")
+            return
+        stamp = self._bg_updated or "--"
+        if known:
+            bar.stop()
+            self._bg_animation[kind] = False
+            average = round(sum(known) / len(known), 1)
+            bar.configure(mode="determinate", value=average)
+            prefix = "平均进度" if count > 1 else "进度"
+            suffix = f" · 已获取 {len(known)}/{count}" if len(known) < count else ""
+            note.config(
+                text=f"{prefix} {average:g}%{suffix} · 更新 {stamp}",
+                foreground="#1565c0")
+        else:
+            bar.configure(mode="indeterminate")
+            if not self._bg_animation[kind]:
+                bar.start(24)
+                self._bg_animation[kind] = True
+            note.config(
+                text=f"正在读取 StorCLI 进度 · 更新 {stamp}",
+                foreground="#b26a00")
+
+    def request_background_progress(self):
+        ctrl = self.app.current_ctrl
+        if ctrl is None:
+            return
+        seq = self._bg_load_seq
+        for entry in self._bg_snapshot:
+            if entry.get("progress") is not None:
+                continue
+            args = self.progress_query_args(ctrl, entry)
+            if not args or entry["key"] in self._bg_progress_requested:
+                continue
+            self._bg_progress_requested.add(entry["key"])
+            self._bg_progress_pending += 1
+
+            def done(res, target=dict(entry), request_ctrl=ctrl, request_seq=seq):
+                self._bg_progress_pending = max(0, self._bg_progress_pending - 1)
+                if (request_ctrl != self.app.current_ctrl
+                        or request_seq != self._bg_load_seq):
+                    return
+                self.on_background_progress(res, target)
+
+            self.app.run_cmd(
+                args, done, timeout=30, ctrl=ctrl)
+
+    @staticmethod
+    def progress_query_args(ctrl, entry):
+        code = entry.get("code", "")
+        kind = entry.get("kind")
+        if kind == "vd" and code in ("init", "migrate", "bgi", "cc"):
+            try:
+                index = entry["key"].split(":", 1)[1]
+            except (KeyError, IndexError):
+                return None
+            return [f"/c{ctrl}/v{index}", "show", code, "J"]
+        if kind == "pd" and code in ("rebuild", "copyback", "init",
+                                     "patrolread", "erase"):
+            parts = entry.get("key", "").split(":")
+            if len(parts) != 3:
+                return None
+            return [f"/c{ctrl}/e{parts[1]}/s{parts[2]}",
+                    "show", code, "J"]
+        return None
+
+    def on_background_progress(self, res, target):
+        if not res.get("ok"):
+            self.background_progress_error(
+                f"进度读取失败: {res.get('error', '未知错误')}")
+            return
+        try:
+            payload = parse_json_output(res.get("stdout", ""))
+        except Exception:
+            self.background_progress_error("StorCLI 未返回可解析的进度数据")
+            return
+        rows = operation_rows_from_payload(payload)
+        selected = None
+        for row in rows:
+            candidate = background_operation_entry(
+                row, target["kind"], target.get("code", ""))
+            if candidate:
+                selected = candidate
+                break
+        if selected is None:
+            return
+        selected["key"] = target["key"]
+        selected["target"] = target["target"]
+        if not selected.get("detail"):
+            selected["detail"] = target.get("detail", "")
+        replaced = False
+        for index, current in enumerate(self._bg_snapshot):
+            if current["key"] == target["key"]:
+                self._bg_snapshot[index] = selected
+                replaced = True
+                break
+        if not replaced:
+            self._bg_snapshot.append(selected)
+            self._bg_snapshot.sort(
+                key=lambda item: (0 if item["kind"] == "vd" else 1,
+                                  item["target"].casefold()))
+        self._bg_updated = time.strftime("%H:%M:%S")
+        self.refresh_background_ui()
+        self.update_bg_details()
+
+    def background_progress_error(self, message):
+        self._bg_updated = time.strftime("%H:%M:%S")
+        if self.bg_details_window is not None:
+            self.bg_details_window.update_snapshot(
+                self._bg_snapshot, self._bg_updated, error=message)
+
+    def update_bg_details(self):
+        window = self.bg_details_window
+        if window is None:
+            return
+        try:
+            if window.winfo_exists():
+                window.update_snapshot(self._bg_snapshot, self._bg_updated)
+        except tk.TclError:
+            self.bg_details_window = None
+
+    def show_bg_details(self):
+        window = self.bg_details_window
+        try:
+            if window is not None and window.winfo_exists():
+                window.lift()
+                window.focus_force()
+                return
+        except tk.TclError:
+            self.bg_details_window = None
+        ctrl = self.app.current_ctrl
+        if ctrl is None:
+            messagebox.showinfo(
+                "后台操作", "请先选择控制器。", parent=self.app.root)
+            return
+        window = BackgroundOperationsDialog(self, ctrl)
+        self.bg_details_window = window
+        window.update_snapshot(self._bg_snapshot, self._bg_updated)
+        window.lift()
+
+    def refresh_background(self, manual=False, details=None):
+        if details is not None:
+            self.bg_details_window = details
+        ctrl = self.app.current_ctrl
+        if ctrl is None:
+            if details is not None:
+                details.update_snapshot([], "", error="未选择控制器")
+            return False
+        if (self._bg_inflight or self._bg_progress_pending
+                or self.app.operation_active or self.app.pending):
+            if manual and details is not None:
+                details.set_busy("后台数据刷新中，完成后会自动更新...")
+            return False
+        self._bg_inflight = True
+        self._bg_load_seq += 1
+        seq = self._bg_load_seq
+        self._bg_progress_requested = set()
+        if details is not None:
+            details.set_busy(f"正在刷新控制器 {ctrl} 的后台操作...")
+
+        def done(res):
+            self._bg_inflight = False
+            if ctrl != self.app.current_ctrl or seq != self._bg_load_seq:
+                return
+            if not res.get("ok"):
+                self._bg_updated = time.strftime("%H:%M:%S")
+                if details is not None:
+                    details.update_snapshot(
+                        self._bg_snapshot, self._bg_updated,
+                        error=f"刷新失败: {res.get('error', '未知错误')}")
+                return
+            try:
+                payload = parse_json_output(res.get("stdout", ""))
+                rd = payload["Controllers"][0].get("Response Data", {}) or {}
+            except Exception:
+                self._bg_updated = time.strftime("%H:%M:%S")
+                if details is not None:
+                    details.update_snapshot(
+                        self._bg_snapshot, self._bg_updated,
+                        error="StorCLI 未返回可解析的后台操作数据")
+                return
+            self.apply_background_rd(rd, request_progress=True)
+
+        self.app.run_cmd(
+            [f"/c{ctrl}", "show", "all", "J"], done,
+            timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+        return True
+
+    def _background_tick(self):
+        self._bg_refresh_job = None
+        try:
+            visible = self.app.nb.select() == str(self.frame)
+            if self.bg_details_window is not None:
+                try:
+                    visible = visible or bool(self.bg_details_window.winfo_exists())
+                except tk.TclError:
+                    self.bg_details_window = None
+            if visible:
+                self.refresh_background()
+        finally:
+            try:
+                if self.frame.winfo_exists():
+                    self._bg_refresh_job = self.app.root.after(
+                        10000, self._background_tick)
+            except tk.TclError:
+                pass
 
     def update_aso(self, rd):
         aso = rd.get("Advanced Software Option")
@@ -5748,7 +6415,7 @@ class App:
             ("li", "· 顶部「设置...」可指定 storcli64.exe 位置；右下角可启用自动刷新并设置间隔。"),
             ("li", "· F1 打开本帮助, F5 刷新当前页面; 表格支持搜索、状态筛选、排序、导出和右键菜单。"),
             ("h2", "二、页面说明"),
-            ("li", "· 概览: 仪表盘式展示控制器属性、容量使用、后台操作、高级软件选项、固件版本与构建时间、物理盘列表。"),
+            ("li", "· 概览: 仪表盘式展示控制器属性、容量使用、后台操作、高级软件选项、固件版本与构建时间、物理盘列表。后台操作每 10 秒刷新，可通过「More Details」查看逐项进度和预计剩余时间。"),
             ("li", "· 控制器: 包含「概览 / 详细属性 / 原始 JSON」子页；概览显示健康、固件、硬件和资源摘要，详细属性支持筛选。"),
             ("li", "· 虚拟盘: VD 列表; 支持搜索、状态筛选和 CSV 导出; 选中后可编辑/删除/查看详情。"),
             ("li", "· 物理盘: PD 列表; 右键可详情、定位灯、重建、状态设置、热备、SMART、错误计数、固件更新等。"),

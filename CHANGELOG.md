@@ -12,6 +12,27 @@ All notable changes to StorCLI GUI are documented here. The format follows
 
 No unreleased changes.
 
+## [1.5.9] - 2026-11-23
+
+### Added
+
+- Live progress bars for virtual-drive and physical-drive background
+  operations on the overview dashboard.
+- A scoped 10-second refresh cycle that appears only while the overview or
+  background-operation details window is visible.
+- An MSM-style **More Details** window with per-operation target, progress,
+  status, estimated time remaining and drive/array details.
+- StorCLI progress lookup for initialization, migration, BGI, consistency
+  check, rebuild, copyback, patrol read and erase operations.
+- Indeterminate progress animation when an operation is active but the
+  controller does not yet expose a percentage.
+
+### Changed
+
+- Background-operation refresh queries progress only for operations detected as
+  active, avoiding unnecessary StorCLI calls when the controller is idle.
+- Completed and not-in-progress operations are removed from the active view.
+
 ## [1.5.8] - 2026-11-23
 
 ### Added
@@ -210,7 +231,8 @@ No unreleased changes.
 - Controller discovery, overview dashboard, VD/PD/enclosure tables, event log,
   command console and firmware update workflows.
 
-[Unreleased]: https://github.com/WndyHe/StorCLI-GUI/compare/v1.5.8...HEAD
+[Unreleased]: https://github.com/WndyHe/StorCLI-GUI/compare/v1.5.9...HEAD
+[1.5.9]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.9
 [1.5.8]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.8
 [1.5.4]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.4
 [1.5.3]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.3
