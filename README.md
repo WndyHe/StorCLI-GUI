@@ -36,7 +36,7 @@ Download a StorCLI version compatible with your controller and place
 1. Download `StorCLI_GUI.exe` from the latest GitHub Release.
 2. Place it in a writable directory.
 3. Put a compatible `storcli64.exe` in the same directory, or choose its path in
-   the GUI's **StorCLI: 设置...** dialog.
+   the GUI's **StorCLI: Settings...** dialog.
 4. Run `StorCLI_GUI.exe` and accept the administrator permission prompt.
 
 The GUI displays the exact StorCLI command and raw output for every operation.
