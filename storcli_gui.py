@@ -131,21 +131,157 @@ STATE_COLORS = {
 }
 
 
-def parse_fw_build_time(text):
-    m = re.search(r"[Ff]irmware version\s+[\d.\-]+\s+built on\s+([A-Z][a-z]{2}\s+\d{1,2}\s+\d{4})\s+at\s+(\d{2}:\d{2}:\d{2})", text)
-    if m:
-        return f"{m.group(1)}  {m.group(2)}"
-    m = re.search(r"Build date/time:\s*([A-Z][a-z]{2}\s+\d{1,2}\s+\d{4}\s+\d{2}:\d{2}:\d{2})", text)
-    if m:
-        return m.group(1)
-    m = re.search(r"FW Build Time\s*[:=]\s*([^\r\n]+)", text)
-    if m:
-        return m.group(1).strip()
+def parse_fw_build_time(text, prefer_last=False):
+    candidates = []
+    for pattern in (
+            r"[Ff]irmware version\s+[\w.\-]+\s+built on\s+([A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4})\s+(?:at\s+)?(\d{2}:\d{2}:\d{2})",
+            r"[Ff]irmware version\s+[\w.\-]+\s+built on\s+(\d{1,2}/\d{1,2}/\d{4})\s+(?:at\s+)?(\d{2}:\d{2}:\d{2})",
+            r"[Ff]irmware version\s+[\w.\-]+\s+built on\s+(\d{4}/\d{1,2}/\d{1,2})\s+(?:at\s+)?(\d{2}:\d{2}:\d{2})"):
+        for match in re.finditer(pattern, text):
+            candidates.append(f"{match.group(1)} {match.group(2)}".replace("  ", " "))
+    for match in re.finditer(
+            r"Build date/time:\s*([A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4}\s+\d{2}:\d{2}:\d{2})",
+            text):
+        candidates.append(match.group(1))
+    for match in re.finditer(r"FW Build Time\s*[:=]\s*([^\r\n]+)", text):
+        candidates.append(match.group(1).strip())
+    if candidates:
+        return candidates[-1] if prefer_last else candidates[0]
     head = "\n".join(text.splitlines()[:200])
-    m = re.search(r"([A-Z][a-z]{2}\s+\d{1,2}\s+\d{4}\s+\d{2}:\d{2}:\d{2})", head)
-    if m:
-        return m.group(1)
+    matches = list(re.finditer(
+        r"([A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4}\s+\d{2}:\d{2}:\d{2})",
+        head))
+    if matches:
+        selected = matches[-1] if prefer_last else matches[0]
+        return selected.group(1)
     return ""
+
+
+def normalize_fw_build_time(value):
+    text = str(value or "").strip()
+    if not text or text in ("-", "N/A", "NA"):
+        return ""
+    patterns = (
+        r"([A-Z][a-z]{2}\s+\d{1,2},?\s+\d{4}\s+(?:at\s+)?\d{2}:\d{2}:\d{2})",
+        r"(\d{1,2}/\d{1,2}/\d{4}\s+(?:at\s+)?\d{2}:\d{2}:\d{2})",
+        r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{2}:\d{2}:\d{2})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return text
+
+
+def firmware_build_time_from_json(node):
+    wanted = {
+        "firmwarebuildtime", "firmwarebuilddate", "fwbuildtime",
+        "builddatetime", "builddate",
+    }
+    if isinstance(node, dict):
+        for key, value in node.items():
+            key_norm = re.sub(r"[^a-z0-9]+", "", str(key).casefold())
+            if key_norm in wanted and not isinstance(value, (dict, list)):
+                normalized = normalize_fw_build_time(value)
+                if normalized:
+                    return normalized
+        for value in node.values():
+            result = firmware_build_time_from_json(value)
+            if result:
+                return result
+    elif isinstance(node, list):
+        for value in node:
+            result = firmware_build_time_from_json(value)
+            if result:
+                return result
+    return ""
+
+
+def firmware_version_candidates_from_json(node):
+    wanted = {
+        "firmwareversion", "firmwarerevision", "fwversion",
+        "firmwarepackagebuild", "firmwarepackageversion",
+    }
+    found = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_norm = re.sub(r"[^a-z0-9]+", "", str(key).casefold())
+                if (key_norm in wanted and not isinstance(item, (dict, list))
+                        and str(item).strip() not in ("", "-")):
+                    text = str(item).strip()
+                    if text not in found:
+                        found.append(text)
+                else:
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(node)
+    return found
+
+
+def firmware_version_from_json(node):
+    candidates = firmware_version_candidates_from_json(node)
+    return candidates[0] if candidates else ""
+
+
+def parse_fw_build_time_for_version(text, version):
+    version = str(version or "").strip()
+    if not version:
+        return ""
+    escaped = re.escape(version)
+    patterns = (
+        rf"[Ff]irmware version\s+{escaped}\s+built on\s+([A-Z][a-z]{{2}}\s+\d{{1,2}},?\s+\d{{4}})\s+(?:at\s+)?(\d{{2}}:\d{{2}}:\d{{2}})",
+        rf"[Ff]irmware version\s+{escaped}\s+built on\s+(\d{{1,2}}/\d{{1,2}}/\d{{4}})\s+(?:at\s+)?(\d{{2}}:\d{{2}}:\d{{2}})",
+        rf"[Ff]irmware version\s+{escaped}\s+built on\s+(\d{{4}}/\d{{1,2}}/\d{{1,2}})\s+(?:at\s+)?(\d{{2}}:\d{{2}}:\d{{2}})",
+    )
+    candidates = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            candidates.append(
+                f"{match.group(1)} {match.group(2)}".replace("  ", " "))
+    if candidates:
+        return candidates[-1]
+
+    # Firmware versions can include vendor suffixes not present in the
+    # controller property. Match the version anywhere on a firmware line.
+    relaxed = ""
+    for line in text.splitlines():
+        low = line.casefold()
+        if "firmware version" in low and version.casefold() in low:
+            build_time = parse_fw_build_time(line, prefer_last=True)
+            if build_time:
+                relaxed = build_time
+    return relaxed
+
+
+def filter_termlog_for_controller(text, controller_id):
+    """Keep only records that belong to the requested controller."""
+    target = str(controller_id)
+    current = re.compile(rf"\bC{re.escape(target)}:", re.I)
+    any_controller = re.compile(r"\bC\d+:", re.I)
+    section_header = re.compile(
+        r"Firmware Term Log Information on controller\s+(\d+)\s*:", re.I)
+    kept = []
+    section_id = None
+    saw_section = False
+    for line in str(text or "").splitlines():
+        header = section_header.search(line)
+        if header:
+            saw_section = True
+            section_id = int(header.group(1))
+            continue
+        if saw_section and section_id is not None and section_id != int(target):
+            continue
+        if any_controller.search(line) and not current.search(line):
+            continue
+        kept.append(line)
+    if saw_section and not any(line.strip() for line in kept):
+        return ""
+    return "\n".join(kept)
 
 
 def tag_for_state(text):
@@ -414,6 +550,8 @@ HEADER_CN = {
     "SAS address": "SAS 地址",
     "DG/VD": "磁盘组/VD号", "TYPE": "RAID 类型", "Access": "访问", "Consist": "一致性",
     "Cache": "缓存策略", "Cac": "缓存", "sCC": "后台CC",
+    "Ctrl_Prop": "控制器属性", "Value": "值", "RetentionTime": "保持时间",
+    "Temp": "温度", "Mode": "模式", "MfgDate": "制造日期", "Next Learn": "下次学习",
 }
 
 STATE_CN = {
@@ -428,7 +566,7 @@ STATE_CN = {
     "Backplane": "背板", "None": "无", "No PI": "无 PI",
     "WriteThrough": "直写", "WriteBack": "回写", "Disk's Default": "盘默认",
     "Disabled": "已禁用", "Enabled": "已启用", "default": "默认",
-    "ON": "开", "OFF": "关",
+    "ON": "开", "OFF": "关", "SILENCE": "静音", "Alarm": "告警器状态",
     "Disable": "禁用", "Supported": "支持", "Not Supported": "不支持",
     "Available": "可用", "Not Available": "不可用",
     "Present": "存在", "Absent": "不存在",
@@ -454,12 +592,104 @@ STATE_CN = {
     "Degraded": "降级", "Attention": "需要关注", "Warning": "警告",
     "Successful": "成功", "Completed": "已完成", "In Progress": "进行中",
     "Unsecured": "未加密", "Unlocked": "未锁定",
+    "Learning": "学习中", "Charging": "充电中",
+    "Not Charging": "未充电", "Fully Charged": "完全充满",
+    "Discharging": "放电中", "Missng": "丢失",
+    "Dgd (Needs Attention)": "降级（需要关注）",
+    "Dgrd-NdAtn": "降级（需要关注）",
+    "Dgrd-Charging": "降级（充电中）",
+    "Dgrd-Comm Fail": "降级（通信失败）",
 }
 
 STATE_CN_CASEFOLD = {str(key).casefold(): value for key, value in STATE_CN.items()}
 STATE_CN_NORMALIZED = {
     re.sub(r"[\s_\-]+", " ", str(key).strip()).casefold(): value
     for key, value in STATE_CN.items()
+}
+
+BATTERY_PROPERTY_CN = {
+    "Type": "类型",
+    "State": "状态",
+    "Battery State": "电池状态",
+    "Temperature": "温度",
+    "Voltage": "电压",
+    "Current": "电流",
+    "Capacitance": "电容值",
+    "Charging Status": "充电状态",
+    "Relative State of Charge": "相对电荷量",
+    "Absolute state of charge": "绝对电荷量",
+    "Remaining Capacity": "剩余容量",
+    "Full Charge Capacity": "满充容量",
+    "Pack Energy": "储能",
+    "Remaining Reserve Space": "剩余保持容量",
+    "Design Capacity": "设计容量",
+    "Design Voltage": "设计电压",
+    "Manufacture Name": "制造商",
+    "Manufacturer": "制造商",
+    "Serial Number": "序列号",
+    "Date of Manufacture": "制造日期",
+    "Module Version": "模块版本",
+    "Device Name": "设备名称",
+    "Device Chemistry": "电池化学",
+    "Battery FRU": "电池 FRU",
+    "Specification Info": "规格信息",
+    "Pack Stat Configuration": "电池包配置",
+    "tmmFru": "TMM FRU",
+    "tmmBatversionNo": "TMM 电池版本号",
+    "tmmSerialNo": "TMM 序列号",
+    "tmm Date of Manufacture": "TMM 制造日期",
+    "tmmPcbAssmNo": "TMM PCB 组件号",
+    "tmmPCBversionNo": "TMM PCB 版本号",
+    "tmmBatPackAssmNo": "TMM 电池包组件号",
+    "scapBatversionNo": "SCAP 电池版本号",
+    "scapSerialNo": "SCAP 序列号",
+    "scap Date of Manufacture": "SCAP 制造日期",
+    "scapPcbAssmNo": "SCAP PCB 组件号",
+    "scapPCBversionNo": "SCAP PCB 版本号",
+    "scapBatPackAssmNo": "SCAP 电池包组件号",
+    "CacheVault Flash Size": "CacheVault Flash 容量",
+    "Auto Learn Period": "自动学习周期",
+    "Next Learn time": "下次学习时间",
+    "Learn Delay Interval": "学习延迟",
+    "Auto-Learn Mode": "自动学习模式",
+    "Last Successful Learn Time": "上次成功学习时间",
+    "BBU Mode": "BBU 模式",
+    "Learn Cycle Requested": "请求学习周期",
+    "Learn Cycle Active": "学习周期活动中",
+    "Learn Cycle Status": "学习周期状态",
+    "Learn Cycle Timeout": "学习周期超时",
+    "I2C Errors Detected": "I2C 错误",
+    "Battery Pack Missing": "电池包缺失",
+    "Replacement required": "需要更换",
+    "Remaining Capacity Low": "剩余容量低",
+    "Periodic Learn Required": "需要定期学习",
+    "Transparent Learn": "透明学习",
+    "No space to cache offload": "无缓存卸载空间",
+    "Pack is about to fail & should be replaced": "电池包即将故障，应更换",
+    "Cache Offload premium feature required": "缓存卸载需要高级功能授权",
+    "Module microcode update required": "模块微码需要更新",
+    "GasGauge StatusCode": "电量计状态码",
+    "Fully Discharged": "完全放电",
+    "Fully Charged": "完全充满",
+    "Discharging": "放电中",
+    "Initialized": "已初始化",
+    "Remaining Time Alarm": "剩余时间告警",
+    "Terminate Discharge Alarm": "终止放电告警",
+    "Over Temperature": "温度过高",
+    "Charging Terminated": "充电已终止",
+    "Over Charged": "过充",
+    "Charger System State": "充电器状态",
+    "Charger System Ctrl": "充电器控制状态",
+    "Charging current": "充电电流",
+    "Max Error": "最大误差",
+    "Is SOH Good": "健康度正常",
+    "Battery backup charge time": "电池后备充电时间",
+    "Run time to empty": "放电剩余时间",
+    "Average time to empty": "平均放电剩余时间",
+    "Average Time to full": "平均充满时间",
+    "Cycle Count": "循环次数",
+    "Remaining Capacity Alarm": "剩余容量告警",
+    "NVCache State": "NVCache 状态",
 }
 
 DESC_CN = {
@@ -529,6 +759,142 @@ def tr_desc(d):
     return d
 
 
+def battery_property_map(value):
+    result = {}
+    if isinstance(value, list):
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            prop = row_value(row, "Property", "Name", "Ctrl_Prop")
+            prop_value = row_value(row, "Value", "Current Value")
+            if prop is None or prop_value is None:
+                continue
+            result[str(prop).strip()] = prop_value
+    elif isinstance(value, dict):
+        if row_value(value, "Property") is not None:
+            prop = row_value(value, "Property")
+            prop_value = row_value(value, "Value")
+            if prop is not None and prop_value is not None:
+                result[str(prop).strip()] = prop_value
+        else:
+            for key, prop_value in value.items():
+                if isinstance(prop_value, (dict, list)):
+                    continue
+                result[str(key).strip()] = prop_value
+    return result
+
+
+def battery_property_label(prop):
+    return BATTERY_PROPERTY_CN.get(prop, tr_prop(prop))
+
+
+def battery_property_value(value):
+    return tr_state(fmt_cell(value))
+
+
+def parse_battery_payload(payload):
+    """Normalize BBU and CacheVault JSON into summary and grouped properties."""
+    try:
+        response = payload["Controllers"][0].get("Response Data", {}) or {}
+    except (KeyError, IndexError, TypeError):
+        return None
+    is_cachevault = "Cachevault_Info" in response
+    if is_cachevault:
+        info = battery_property_map(response.get("Cachevault_Info"))
+        firmware = battery_property_map(response.get("Firmware_Status"))
+        gas_gauge = battery_property_map(response.get("GasGaugeStatus"))
+        design = battery_property_map(response.get("Design_Info"))
+        settings = battery_property_map(response.get("Properties"))
+    else:
+        info = battery_property_map(response.get("BBU_Info"))
+        firmware = battery_property_map(response.get("BBU_Firmware_Status"))
+        gas_gauge = battery_property_map(response.get("GasGaugeStatus"))
+        capacity = battery_property_map(response.get("BBU_Capacity_Info"))
+        design = battery_property_map(response.get("BBU_Design_Info"))
+        settings = battery_property_map(response.get("BBU_Properties"))
+        gas_gauge = {**capacity, **gas_gauge}
+    if not any((info, firmware, gas_gauge, design, settings)):
+        return None
+
+    all_props = {}
+    for source in (info, design, gas_gauge, firmware, settings):
+        for prop, prop_value in source.items():
+            if prop not in all_props or all_props[prop] in ("", "-", None):
+                all_props[prop] = prop_value
+
+    def first(*names):
+        for name in names:
+            for source in (info, firmware, gas_gauge, design, settings):
+                value = source.get(name)
+                if value is not None and str(value).strip() not in ("", "-"):
+                    return value
+        return ""
+
+    kind = "CacheVault" if is_cachevault else "BBU"
+    status = first("Battery State", "State", "Status")
+    capacity = first("Capacitance", "Relative State of Charge",
+                     "Absolute state of charge", "Pack Energy",
+                     "Remaining Capacity", "Full Charge Capacity",
+                     "Design Capacity")
+    charging = first("Charging Status", "Charger System State", "NVCache State")
+    summary = [
+        ("类型", first("Type") or kind),
+        ("状态", status or "-"),
+        ("温度", first("Temperature") or "-"),
+        ("电容 / 电量", capacity or "-"),
+        ("充电状态", charging or "-"),
+    ]
+
+    basic_order = (
+        "Type", "Manufacture Name", "Manufacturer", "Serial Number",
+        "Date of Manufacture", "Module Version", "Device Name",
+        "Device Chemistry", "Voltage")
+    runtime_order = (
+        "Temperature", "Current", "Capacitance", "Relative State of Charge",
+        "Absolute state of charge", "Remaining Capacity", "Full Charge Capacity",
+        "Design Capacity", "Pack Energy", "Remaining Reserve Space",
+        "Charging Status")
+    settings_order = (
+        "Auto Learn Period", "Next Learn time", "Learn Delay Interval",
+        "Auto-Learn Mode", "Last Successful Learn Time", "BBU Mode",
+        "Transparent Learn")
+
+    def ordered(order):
+        pairs = []
+        for prop in order:
+            value = first(prop)
+            if value not in ("", "-", None):
+                pairs.append((prop, value))
+        return pairs
+
+    basic = ordered(basic_order)
+    runtime = ordered(runtime_order)
+    learning = ordered(settings_order)
+    used = {prop for prop, _value in basic + runtime + learning}
+    health_source = {**firmware, **gas_gauge}
+    health = [(prop, value) for prop, value in health_source.items()
+              if prop not in used and str(value).strip() not in ("", "-")]
+    for prop, value in all_props.items():
+        if prop not in used and all(item[0] != prop for item in health):
+            if str(value).strip() not in ("", "-"):
+                health.append((prop, value))
+    sections = [
+        ("基本信息", basic),
+        ("当前容量与状态", runtime),
+        ("学习设置", learning),
+        ("健康状态与固件", health),
+    ]
+    sections = [(title, pairs) for title, pairs in sections if pairs]
+    return {
+        "kind": kind,
+        "status": str(status or ""),
+        "status_tag": tag_for_state(str(status)),
+        "summary": summary,
+        "sections": sections,
+        "all_properties": all_props,
+    }
+
+
 def clean_section_name(p):
     p = str(p).strip()
     p = re.sub(r"^Drive\s+\S+\s+-\s+", "", p)
@@ -561,6 +927,12 @@ SECTION_CN = {
     "DG LIST": "磁盘组列表", "VD LIST": "虚拟盘列表",
     "Advanced Software Option": "高级软件选项",
     "Supported Drives": "支持的物理盘", "Supported Protocols": "支持的协议",
+    "BBU_Info": "BBU 信息", "Cachevault_Info": "CacheVault 信息",
+    "Controller Properties": "控制器属性",
+    "BBU Properties": "BBU 属性", "BBU Capacity Info": "BBU 容量信息",
+    "BBU Design Info": "BBU 设计信息", "BBU Firmware Status": "BBU 固件状态",
+    "Cachevault Learn": "CacheVault 学习信息",
+    "Cachevault Properties": "CacheVault 属性",
 }
 
 CONTROLLER_SECTION_CN = {
@@ -636,7 +1008,7 @@ PROP_CN = {
     "SAS Address": "SAS 地址", "PCI Address": "PCI 地址", "Mfg Date": "制造日期",
     "Rework Date": "返工日期", "Revision No": "修订号",
     "Firmware Package Build": "固件包版本", "Firmware Version": "固件版本",
-    "Firmware Build Time": "固件构建时间",
+    "Firmware Build Time": "固件构建时间", "Firmware Build Date": "固件构建时间",
     "Bios Version": "BIOS 版本", "HII Version": "HII 版本", "HIIA Version": "HIIA 版本",
     "Ctrl-R Version": "Ctrl-R 版本", "CBB Version": "CBB 版本",
     "PSOC FW Version": "PSOC 固件版本", "PSOC Hardware Version": "PSOC 硬件版本",
@@ -1492,27 +1864,6 @@ def apply_menu_item_colors(menu):
                     activeforeground=foreground)
         except tk.TclError:
             continue
-    if not getattr(menu, "_color_select_bound", False):
-        menu.bind(
-            "<<MenuSelect>>",
-            lambda _event, current_menu=menu:
-                apply_active_menu_item_color(current_menu),
-            add="+")
-        menu._color_select_bound = True
-
-
-def apply_active_menu_item_color(menu):
-    active = menu.index("active")
-    if active is None:
-        return
-    try:
-        foreground = str(menu.entrycget(active, "foreground"))
-        if foreground:
-            menu.entryconfigure(
-                active, activebackground=HOVER_BG,
-                activeforeground=foreground)
-    except tk.TclError:
-        pass
 
 
 def bind_context_menu(widget, build_entries):
@@ -1548,6 +1899,7 @@ def bind_context_menu(widget, build_entries):
         return "break"
 
     widget.bind("<Button-3>", popup)
+    return menu
 
 
 def text_menu_entries(text):
@@ -1649,8 +2001,15 @@ class Worker(threading.Thread):
             job = self.app.cmd_q.get()
             if job is None:
                 break
-            exe, args, timeout, callback, ctrl, request_id = job
-            result = self.execute(exe, args, timeout)
+            exe, args, timeout, callback, ctrl, request_id, is_stale = job
+            try:
+                skip = bool(is_stale and is_stale())
+            except Exception:
+                skip = False
+            if skip:
+                result = {"ok": False, "skipped": True}
+            else:
+                result = self.execute(exe, args, timeout)
             result["args"] = args
             result["callback"] = callback
             result["ctrl"] = ctrl
@@ -1706,7 +2065,10 @@ class TextTab:
                 return
             self.on_done(res)
 
-        self.app.run_cmd(args, done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+        self.app.run_cmd(
+            args, done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl,
+            is_stale=lambda c=ctrl, s=seq:
+                c != self.app.current_ctrl or s != self._load_seq)
 
     def on_done(self, res):
         if res.get("ok"):
@@ -1829,7 +2191,10 @@ class DataTab:
                 return
             self.on_done(res)
 
-        self.app.run_cmd(args + ["J"], done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+        self.app.run_cmd(
+            args + ["J"], done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl,
+            is_stale=lambda c=ctrl, s=seq:
+                c != self.app.current_ctrl or s != self._load_seq)
 
     def on_done(self, res):
         if not res.get("ok"):
@@ -2165,7 +2530,10 @@ class EventsTab:
                 return
             self.on_done(res, raw_only)
 
-        self.app.run_cmd(args, done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+        self.app.run_cmd(
+            args, done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl,
+            is_stale=lambda c=ctrl, s=seq:
+                c != self.app.current_ctrl or s != self._load_seq)
 
     def prepare_controller(self, ctrl):
         if self.loaded_ctrl == ctrl:
@@ -3438,6 +3806,199 @@ class BackgroundOperationsDialog(tk.Toplevel):
         self.destroy()
 
 
+class BatterySummaryWindow(tk.Toplevel):
+    """MSM-style summary card for BBU or CacheVault information."""
+
+    def __init__(self, app, ctrl, data, res, command):
+        super().__init__(app.root)
+        self.app = app
+        self.ctrl = ctrl
+        self.data = data
+        self.res = res
+        self.command = command
+        self.advanced_window = None
+        self.title(f"{data['kind']} 简略信息 - 控制器 {ctrl}")
+        self.geometry("700x390")
+        self.minsize(620, 360)
+        self.transient(app.root)
+        self.protocol("WM_DELETE_WINDOW", self.close)
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=14, pady=(12, 6))
+        ttk.Label(
+            top, text=f"{data['kind']} 简略信息",
+            font=(UI_FONT[0], UI_FONT[1] + 4, "bold")).pack(anchor="w")
+        ttk.Label(
+            top, text=f"控制器 {ctrl} · 只读摘要",
+            foreground="#666").pack(anchor="w", pady=(3, 0))
+
+        card = tk.Frame(
+            self, background=CONTENT_BG, highlightthickness=1,
+            highlightbackground="#c8c8c8")
+        card.pack(fill="both", expand=True, padx=14, pady=6)
+        card.columnconfigure(1, weight=1)
+        self.summary_labels = {}
+        for row, (label, value) in enumerate(data["summary"]):
+            tk.Label(
+                card, text=label, background=CONTENT_BG,
+                foreground="#555", anchor="w", width=16,
+                font=UI_FONT).grid(
+                    row=row, column=0, sticky="nw", padx=(14, 8), pady=7)
+            shown = battery_property_value(value)
+            value_label = tk.Label(
+                card, text=shown, background=CONTENT_BG,
+                foreground=TEXT_FG, anchor="w", justify="left",
+                wraplength=470, font=UI_FONT)
+            value_label.grid(
+                row=row, column=1, sticky="ew", padx=(0, 14), pady=7)
+            if label == "状态":
+                tag = tag_for_state(str(value))
+                value_label.configure(
+                    foreground={"green": "#0a7d32", "orange": "#b26a00",
+                                "red": DANGER_COLOR}.get(tag, TEXT_FG))
+            self.summary_labels[label] = value_label
+
+        actions = ttk.Frame(self)
+        actions.pack(fill="x", padx=14, pady=(4, 12))
+        self.advanced_btn = tk.Button(
+            actions, text="高级属性...", command=self.open_advanced,
+            relief="flat", borderwidth=0, background=WINDOW_BG,
+            foreground="#1565c0", activebackground=HOVER_BG,
+            activeforeground="#1565c0", cursor="hand2",
+            font=(UI_FONT[0], UI_FONT[1], "underline"))
+        self.advanced_btn.pack(side="left")
+        ttk.Button(
+            actions, text="原始输出...", command=self.show_raw
+        ).pack(side="right")
+        ttk.Button(
+            actions, text="关闭", command=self.close
+        ).pack(side="right", padx=(0, 6))
+        ttk.Button(
+            actions, text="刷新", command=self.refresh
+        ).pack(side="right", padx=(0, 12))
+
+    def open_advanced(self):
+        window = self.advanced_window
+        try:
+            if window is not None and window.winfo_exists():
+                window.lift()
+                window.focus_force()
+                return
+        except tk.TclError:
+            self.advanced_window = None
+        window = BatteryAdvancedWindow(
+            self.app, self.ctrl, self.data, self.res, self.command, self)
+        self.advanced_window = window
+        window.lift()
+
+    def show_raw(self):
+        show_result_window(
+            self.app, f"{self.data['kind']} 原始输出",
+            self.res, self.command)
+
+    def refresh(self):
+        self.app.op_bbu()
+
+    def close(self):
+        if self.advanced_window is not None:
+            try:
+                self.advanced_window.close()
+            except tk.TclError:
+                pass
+            self.advanced_window = None
+        if self.app.bbu_summary_window is self:
+            self.app.bbu_summary_window = None
+        self.destroy()
+
+
+class BatteryAdvancedWindow(tk.Toplevel):
+    """Grouped read-only BBU/CacheVault properties inspired by MSM."""
+
+    def __init__(self, app, ctrl, data, res, command, summary=None):
+        super().__init__(app.root)
+        self.app = app
+        self.ctrl = ctrl
+        self.data = data
+        self.res = res
+        self.command = command
+        self.summary = summary
+        self.trees = []
+        self.title(f"{data['kind']} 高级属性 - 控制器 {ctrl}")
+        self.geometry("900x620")
+        self.minsize(720, 480)
+        self.transient(app.root)
+        self.protocol("WM_DELETE_WINDOW", self.close)
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=14, pady=(12, 4))
+        ttk.Label(
+            top, text="高级属性",
+            font=(UI_FONT[0], UI_FONT[1] + 4, "bold")).pack(anchor="w")
+        ttk.Label(
+            top, text=f"{data['kind']} · 控制器 {ctrl} · 属性仅供查看",
+            foreground="#666").pack(anchor="w", pady=(3, 0))
+
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=14, pady=6)
+        for title, pairs in data["sections"]:
+            page = ttk.Frame(notebook)
+            notebook.add(page, text=f"  {title}  ")
+            wrap = ttk.Frame(page)
+            wrap.pack(fill="both", expand=True, padx=6, pady=6)
+            tree = ttk.Treeview(
+                wrap, show="headings",
+                columns=("property", "value"), selectmode="browse")
+            vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+            hsb = ttk.Scrollbar(wrap, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            vsb.grid(row=0, column=1, sticky="ns")
+            hsb.grid(row=1, column=0, sticky="ew")
+            wrap.rowconfigure(0, weight=1)
+            wrap.columnconfigure(0, weight=1)
+            tree.heading("property", text="属性")
+            tree.heading("value", text="值")
+            tree.column("property", width=280, anchor="w", stretch=False)
+            tree.column("value", width=540, anchor="w")
+            tree.tag_configure("good", foreground="#0a7d32")
+            tree.tag_configure("attention", foreground="#b26a00")
+            tree.tag_configure("error", foreground=DANGER_COLOR)
+            self.trees.append(tree)
+            for prop, value in pairs:
+                tag = tag_for_state(str(value))
+                tree.insert(
+                    "", "end",
+                    values=(battery_property_label(prop),
+                            battery_property_value(value)),
+                    tags=(tag,) if tag else ())
+
+        ttk.Label(
+            self,
+            text=("学习设置由控制器固件管理，本窗口为只读。"
+                  "如需修改学习周期或模式，请使用支持写入的 MSM 或 StorCLI 命令。"),
+            foreground="#666", wraplength=850, justify="left").pack(
+                fill="x", padx=14, pady=(2, 4))
+
+        actions = ttk.Frame(self)
+        actions.pack(fill="x", padx=14, pady=(4, 12))
+        ttk.Button(
+            actions, text="原始输出...", command=self.show_raw
+        ).pack(side="left")
+        ttk.Button(
+            actions, text="关闭", command=self.close
+        ).pack(side="right")
+
+    def show_raw(self):
+        show_result_window(
+            self.app, f"{self.data['kind']} 原始输出",
+            self.res, self.command)
+
+    def close(self):
+        if self.summary is not None and self.summary.advanced_window is self:
+            self.summary.advanced_window = None
+        self.destroy()
+
+
 class OverviewTab:
     """概览页: MSM 主界面风格的仪表盘 + 物理盘/背板表, 可切换原始输出."""
 
@@ -3448,7 +4009,11 @@ class OverviewTab:
         self.raw_text = ""
         self.tree_mode = True
         self.fw_build_time = ""
+        self.fw_raw_checked = False
+        self.fw_termlog_checked = False
         self._rd = None
+        self._rd_ctrl = None
+        self._rd_seq = 0
         self.loaded_ctrl = None
         self._load_seq = 0
         self._bg_vd_rows = []
@@ -3511,7 +4076,6 @@ class OverviewTab:
         self.bg_vd_bar = ttk.Progressbar(
             bf, orient="horizontal", mode="determinate",
             maximum=100, value=0)
-        self.bg_vd_bar.pack(fill="x", padx=12, pady=(0, 2))
         self.bg_vd_note = ttk.Label(
             bf, text="暂无后台操作", foreground="#666",
             font=(UI_FONT[0], UI_FONT[1] - 1))
@@ -3521,13 +4085,12 @@ class OverviewTab:
         self.bg_pd_bar = ttk.Progressbar(
             bf, orient="horizontal", mode="determinate",
             maximum=100, value=0)
-        self.bg_pd_bar.pack(fill="x", padx=12, pady=(0, 2))
         self.bg_pd_note = ttk.Label(
             bf, text="暂无后台操作", foreground="#666",
             font=(UI_FONT[0], UI_FONT[1] - 1))
         self.bg_pd_note.pack(anchor="w", padx=12, pady=(0, 4))
         self.bg_more_btn = tk.Button(
-            bf, text="More Details", command=self.show_bg_details,
+            bf, text="更多详情", command=self.show_bg_details,
             relief="flat", borderwidth=0, background=WINDOW_BG,
             foreground="#1565c0", activebackground=HOVER_BG,
             activeforeground="#1565c0", cursor="hand2",
@@ -3550,7 +4113,7 @@ class OverviewTab:
                 ("控制器固件更新...", self.app.ctrl_fw),
                 ("物理盘固件更新...", self.app.pd_fw),
                 ("关闭报警", self.app.op_alarm_off),
-                ("重新扫描", self.app.op_rescan)]):
+                ("重新检测控制器", self.app.op_rescan)]):
             ttk.Button(xf, text=text, command=cmd).grid(
                 row=i, column=0, sticky="w", padx=8, pady=1)
 
@@ -3583,6 +4146,10 @@ class OverviewTab:
             self.info.config(text="未选择控制器")
             return
         ctrl = self.app.current_ctrl
+        self.fw_build_time = ""
+        self.fw_raw_checked = False
+        self.fw_termlog_checked = False
+        self.clear_fw_build_time_display()
         if self.loaded_ctrl != ctrl:
             try:
                 if (self.bg_details_window is not None
@@ -3592,8 +4159,12 @@ class OverviewTab:
                 self.bg_details_window = None
             self.loaded_ctrl = ctrl
             self._rd = None
+            self._rd_ctrl = None
+            self._rd_seq = 0
             self.raw_text = ""
             self.fw_build_time = ""
+            self.fw_raw_checked = False
+            self.fw_termlog_checked = False
             self.tbl_tree.delete(*self.tbl_tree.get_children())
             self.tbl_tree.configure(columns=())
             self.kv_tree.delete(*self.kv_tree.get_children())
@@ -3620,7 +4191,12 @@ class OverviewTab:
         self.info.config(text="加载中...")
         self.app.run_cmd([f"/c{ctrl}", "show", "all", "J"],
                          lambda res: self._main_done(res, ctrl, seq),
-                         timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+                         timeout=DEFAULT_TIMEOUT, ctrl=ctrl,
+                         is_stale=lambda: not self._request_is_current(
+                             ctrl, seq))
+
+    def _request_is_current(self, ctrl, seq):
+        return ctrl == self.app.current_ctrl and seq == self._load_seq
 
     def _main_done(self, res, ctrl, seq):
         if ctrl != self.app.current_ctrl or seq != self._load_seq:
@@ -3629,10 +4205,12 @@ class OverviewTab:
 
     def _run_aux(self, args, ctrl, seq, callback):
         def done(res):
-            if ctrl != self.app.current_ctrl or seq != self._load_seq:
+            if not self._request_is_current(ctrl, seq):
                 return
             callback(res)
-        self.app.run_cmd(args, done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+        self.app.run_cmd(
+            args, done, timeout=DEFAULT_TIMEOUT, ctrl=ctrl,
+            is_stale=lambda: not self._request_is_current(ctrl, seq))
 
     def on_done(self, res, ctrl, seq):
         if not res.get("ok"):
@@ -3656,6 +4234,11 @@ class OverviewTab:
             self.info.config(text=f"{res['elapsed']:.1f}s")
             return
         self._rd = rd
+        self._rd_ctrl = ctrl
+        self._rd_seq = seq
+        json_build_time = firmware_build_time_from_json(rd)
+        if json_build_time:
+            self.fw_build_time = json_build_time
         self.update_props(rd)
         self.update_usage(rd)
         self.apply_background_rd(rd, request_progress=True)
@@ -3676,8 +4259,12 @@ class OverviewTab:
         self.info.config(
             text=f"{tr_status(status_text) or '成功'} · {res['elapsed']:.1f}s · "
                  f"{time.strftime('%H:%M:%S')}")
-        self._run_aux([f"/c{ctrl}", "show", "all"], ctrl, seq, self.on_raw)
-        self._run_aux([f"/c{ctrl}", "show", "termlog"], ctrl, seq, self.on_termlog)
+        self._run_aux(
+            [f"/c{ctrl}", "show", "all"], ctrl, seq,
+            lambda aux_res: self.on_raw(aux_res, ctrl, seq))
+        self._run_aux(
+            [f"/c{ctrl}", "show", "termlog"], ctrl, seq,
+            lambda aux_res: self.on_termlog(aux_res, ctrl, seq))
         self._run_aux([f"/c{ctrl}", "/vall", "show", "J"], ctrl, seq, self.on_vd)
 
     def update_props(self, rd):
@@ -3808,12 +4395,15 @@ class OverviewTab:
             bar.stop()
             self._bg_animation[kind] = False
             bar.configure(mode="determinate", value=0)
+            bar.pack_forget()
             note.config(
                 text=("当前无后台操作 · 10 秒自动刷新"
                       if self._bg_updated else "暂无后台操作"),
                 foreground="#666")
             return
         stamp = self._bg_updated or "--"
+        if not bar.winfo_manager():
+            bar.pack(fill="x", padx=12, pady=(0, 2), before=note)
         if known:
             bar.stop()
             self._bg_animation[kind] = False
@@ -4036,43 +4626,77 @@ class OverviewTab:
         self.aso_text.insert("end", "\n".join(lines) if lines else "(无)")
         self.aso_text.config(state="disabled")
 
+    def clear_fw_build_time_display(self):
+        for iid in self.kv_tree.get_children():
+            values = self.kv_tree.item(iid, "values")
+            if values and str(values[0]) == "固件构建时间":
+                self.kv_tree.delete(iid)
+
     def render_kv(self, rd):
         self.kv_tree.delete(*self.kv_tree.get_children())
         data = rd.get("Version")
+        build_time_rendered = False
         if isinstance(data, dict):
             for key, value in data.items():
                 if isinstance(value, (list, dict)):
                     continue
-                self.kv_tree.insert("", "end", values=(tr_prop(key), tr_state(fmt_cell(value))))
-            if self.fw_build_time:
+                key_norm = normalized_field(key)
+                if key_norm in ("firmwarebuildtime", "firmwarebuilddate",
+                                "fwbuildtime", "builddatetime"):
+                    shown = normalize_fw_build_time(value)
+                    build_time_rendered = build_time_rendered or bool(shown)
+                else:
+                    shown = tr_state(fmt_cell(value))
+                self.kv_tree.insert("", "end", values=(tr_prop(key), shown))
+            if self.fw_build_time and not build_time_rendered:
                 self.kv_tree.insert("", "end", values=("固件构建时间", self.fw_build_time))
+            elif not build_time_rendered:
+                status = ("StorCLI 未提供"
+                          if self.fw_raw_checked and self.fw_termlog_checked
+                          else "正在读取...")
+                self.kv_tree.insert("", "end", values=("固件构建时间", status))
 
-    def on_termlog(self, res):
-        try:
-            import tempfile
-            dump = os.path.join(tempfile.gettempdir(), "storcli_gui_termlog.txt")
-            with open(dump, "w", encoding="utf-8", errors="replace") as fh:
-                fh.write(res.get("stdout", "") or "")
-                if res.get("stderr"):
-                    fh.write("\n--- stderr ---\n" + (res.get("stderr") or ""))
-                if res.get("error"):
-                    fh.write("\n--- error ---\n" + str(res.get("error")))
-        except Exception:
-            pass
-        if not res.get("ok") or self._rd is None:
+    def on_raw(self, res, ctrl, seq):
+        if (not self._request_is_current(ctrl, seq)
+                or self._rd is None or self._rd_ctrl != ctrl
+                or self._rd_seq != seq):
             return
-        bt = parse_fw_build_time(res.get("stdout", "") or "")
-        if bt and bt != self.fw_build_time:
-            self.fw_build_time = bt
-            self.render_kv(self._rd)
-
-    def on_raw(self, res):
+        self.fw_raw_checked = True
         if res.get("ok"):
+            build_time = parse_fw_build_time(res.get("stdout", "") or "")
+            if build_time and build_time != self.fw_build_time:
+                self.fw_build_time = build_time
+            self.render_kv(self._rd)
             self.raw_text = res["stdout"]
             if res["stderr"].strip():
                 self.raw_text += "\n--- stderr ---\n" + res["stderr"]
             if not self.tree_mode:
                 self.show_text(self.raw_text)
+
+    def on_termlog(self, res, ctrl, seq):
+        if (not self._request_is_current(ctrl, seq)
+                or self._rd is None or self._rd_ctrl != ctrl
+                or self._rd_seq != seq):
+            return
+        self.fw_termlog_checked = True
+        if not res.get("ok"):
+            self.render_kv(self._rd)
+            return
+        termlog = filter_termlog_for_controller(
+            res.get("stdout", "") or "", ctrl)
+        versions = firmware_version_candidates_from_json(self._rd or {})
+        build_time = ""
+        for version in versions:
+            build_time = parse_fw_build_time_for_version(
+                termlog, version)
+            if build_time:
+                break
+        if not versions:
+            build_time = parse_fw_build_time(
+                termlog, prefer_last=True)
+        if build_time and build_time != self.fw_build_time:
+            self.fw_build_time = build_time
+        self.render_kv(self._rd)
 
     def show_mode(self, tree):
         self.tree_mode = tree
@@ -4282,7 +4906,9 @@ class ControllerTab:
         args = [f"/c{ctrl}", "show", "all", "J"]
         self.app.run_cmd(
             args, lambda res: self._on_result(res, ctrl, seq),
-            timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+            timeout=DEFAULT_TIMEOUT, ctrl=ctrl,
+            is_stale=lambda c=ctrl, s=seq:
+                c != self.app.current_ctrl or s != self._load_seq)
 
     def on_view_changed(self, _event=None):
         try:
@@ -5036,6 +5662,7 @@ class App:
         self.current_ctrl = None
         self.controllers = []
         self.controller_health = {}
+        self.bbu_summary_window = None
         self.last_path = None
         self.worker = Worker(self)
         self.worker.start()
@@ -5235,24 +5862,23 @@ class App:
         self.nb.add(self.tab_events.frame, text="  事件日志  ")
         self.nb.add(self.tab_console.frame, text="  命令控制台  ")
         bind_context_menu(self.sidebar, lambda: [
-            ("刷新控制器", self.refresh_controllers),
-            ("重新扫描", self.op_rescan),
+            ("重新检测控制器", self.op_rescan),
             "-",
             ("开始巡检", self.op_patrol_start),
             ("停止巡检", self.op_patrol_stop),
             ("巡检状态", self.op_patrol_show),
             "-",
             ("查看外来配置", self.op_foreign_show),
-            ("导入外来配置", self.op_foreign_import),
-            ("删除外来配置", self.op_foreign_del),
+            ("导入外来配置", self.op_foreign_import, "danger"),
+            ("删除外来配置", self.op_foreign_del, "danger"),
             "-",
-            ("BBU / CacheVault 信息", self.op_bbu),
-            ("控制器固件更新...", self.ctrl_fw),
+            ("BBU / CacheVault 信息...", self.op_bbu),
+            ("控制器固件更新...", self.ctrl_fw, "danger"),
             ("报警状态", self.op_alarm_show),
             ("开启报警", self.op_alarm_on),
             ("关闭报警", self.op_alarm_off),
             "-",
-            ("清除控制器全部配置 (危险!)", self.op_clear_config)])
+            ("清除控制器全部配置 (危险!)", self.op_clear_config, "danger")])
         bind_context_menu(self.tab_overview.kv_tree, lambda: [
             ("复制值", self._copy_kv_value),
             ("复制行", lambda: self._copy_tree_row(self.tab_overview.kv_tree))])
@@ -5296,7 +5922,7 @@ class App:
     def build_menu(self):
         menubar = tk.Menu(self.root)
         ops = tk.Menu(menubar, tearoff=0)
-        ops.add_command(label="重新扫描", command=self.op_rescan)
+        ops.add_command(label="重新检测控制器", command=self.op_rescan)
         ops.add_separator()
         ops.add_command(label="开始巡检", command=self.op_patrol_start)
         ops.add_command(label="停止巡检", command=self.op_patrol_stop)
@@ -5306,8 +5932,8 @@ class App:
         ops.add_command(label="导入外来配置", command=self.op_foreign_import, foreground=DANGER_COLOR)
         ops.add_command(label="删除外来配置", command=self.op_foreign_del, foreground=DANGER_COLOR)
         ops.add_separator()
-        ops.add_command(label="BBU / CacheVault 信息", command=self.op_bbu)
-        ops.add_command(label="控制器固件更新...", command=self.ctrl_fw)
+        ops.add_command(label="BBU / CacheVault 信息...", command=self.op_bbu)
+        ops.add_command(label="控制器固件更新...", command=self.ctrl_fw, foreground=DANGER_COLOR)
         ops.add_command(label="报警状态", command=self.op_alarm_show)
         ops.add_command(label="开启报警", command=self.op_alarm_on)
         ops.add_command(label="关闭报警", command=self.op_alarm_off)
@@ -5362,15 +5988,17 @@ class App:
                 return int(match.group(1))
         return None
 
-    def run_cmd(self, args, on_done, timeout=DEFAULT_TIMEOUT, ctrl=None):
+    def run_cmd(self, args, on_done, timeout=DEFAULT_TIMEOUT, ctrl=None,
+                is_stale=None):
         self.pending += 1
         self.request_seq += 1
         if ctrl is None:
             ctrl = self.controller_from_args(args)
         self.status_var.set(f"执行中: storcli64 {' '.join(args)}")
         self.root.config(cursor="watch")
-        self.cmd_q.put((self.path_var.get().strip(), list(args), timeout, on_done,
-                        ctrl, self.request_seq))
+        self.cmd_q.put((
+            self.path_var.get().strip(), list(args), timeout, on_done,
+            ctrl, self.request_seq, is_stale))
 
     def require_operation_idle(self):
         if not self.operation_active:
@@ -5419,11 +6047,13 @@ class App:
                 res = self.result_q.get_nowait()
                 self.pending = max(0, self.pending - 1)
                 callback = res.pop("callback", None)
-                try:
-                    if callback:
-                        callback(res)
-                except Exception as exc:
-                    messagebox.showerror(APP_TITLE, f"界面处理出错: {exc}", parent=self.root)
+                if not res.get("skipped"):
+                    try:
+                        if callback:
+                            callback(res)
+                    except Exception as exc:
+                        messagebox.showerror(
+                            APP_TITLE, f"界面处理出错: {exc}", parent=self.root)
                 if self.pending == 0:
                     self.status_var.set("就绪")
                     self.root.config(cursor="")
@@ -5434,6 +6064,7 @@ class App:
     # -- 控制器发现
 
     def refresh_controllers(self):
+        self.close_battery_summary()
         self.controller_refresh_seq += 1
         seq = self.controller_refresh_seq
         self.controllers = []
@@ -5575,6 +6206,7 @@ class App:
             return
         if cid == self.current_ctrl:
             return
+        self.close_battery_summary()
         self.current_ctrl = cid
         self.reload_tabs()
 
@@ -6179,7 +6811,44 @@ class App:
     # -- 控制器操作(菜单栏与右键菜单共用)
 
     def op_rescan(self):
-        self.op("重新扫描", lambda _n: ["/call", "rescan"], need_ctrl=False)
+        if self.require_operation_idle():
+            self.status_var.set("正在重新检测控制器列表...")
+            self.refresh_controllers()
+
+    def query_controller(self, title, build):
+        if self.current_ctrl is None:
+            messagebox.showinfo(APP_TITLE, "未选择控制器。", parent=self.root)
+            return
+        ctrl = self.current_ctrl
+        args = build(ctrl)
+        self.status_var.set(f"查询中: storcli64 {' '.join(args)}")
+
+        def done(res):
+            if ctrl != self.current_ctrl:
+                return
+            self.show_query_result(title, res, args)
+
+        self.run_cmd(args, done, ctrl=ctrl)
+
+    def show_query_result(self, title, res, args):
+        if not res.get("ok") and not (res.get("stdout") or "").strip():
+            failure = dict(res)
+            failure["stdout"] = res.get("error", "StorCLI 未返回任何结果。")
+            show_result_window(self, title, failure, " ".join(args))
+            return
+        show_structured(self, title, res, " ".join(args))
+
+    @staticmethod
+    def query_has_result(res):
+        if not res.get("ok") or not (res.get("stdout") or "").strip():
+            return False
+        try:
+            payload = parse_json_output(res.get("stdout", ""))
+            status, _desc = command_status(payload)
+            data = payload["Controllers"][0].get("Response Data", {}) or {}
+            return str(status).casefold() == "success" and bool(data)
+        except Exception:
+            return res.get("code") == 0
 
     def op_patrol_start(self):
         self.op("开始巡检", lambda n: [f"/c{n}", "start", "patrolread"], confirm=True, refresh=True)
@@ -6188,10 +6857,12 @@ class App:
         self.op("停止巡检", lambda n: [f"/c{n}", "stop", "patrolread"], confirm=True, refresh=True)
 
     def op_patrol_show(self):
-        self.op("巡检状态", lambda n: [f"/c{n}", "show", "patrolread"])
+        self.query_controller(
+            "巡检状态", lambda n: [f"/c{n}", "show", "patrolread", "J"])
 
     def op_foreign_show(self):
-        self.op("外来配置", lambda n: [f"/c{n}/fall", "show"])
+        self.query_controller(
+            "外来配置", lambda n: [f"/c{n}/fall", "show", "J"])
 
     def op_foreign_import(self):
         self.op("导入外来配置", lambda n: [f"/c{n}/fall", "import"], confirm=True, danger=True, refresh=True)
@@ -6200,10 +6871,88 @@ class App:
         self.op("删除外来配置", lambda n: [f"/c{n}/fall", "del"], confirm=True, danger=True, refresh=True)
 
     def op_bbu(self):
-        self.op("BBU / CacheVault", lambda n: [f"/c{n}/bbu", "show", "all"])
+        if self.current_ctrl is None:
+            messagebox.showinfo(APP_TITLE, "未选择控制器。", parent=self.root)
+            return
+        self.close_battery_summary()
+        ctrl = self.current_ctrl
+        bbu_args = [f"/c{ctrl}/bbu", "show", "all", "J"]
+        cv_args = [f"/c{ctrl}/cv", "show", "all", "J"]
+        self.status_var.set(f"查询中: storcli64 {' '.join(bbu_args)}")
+        self.run_cmd(
+            bbu_args,
+            lambda res: self.on_bbu_query(res, ctrl, bbu_args, cv_args),
+            ctrl=ctrl)
+
+    def close_battery_summary(self):
+        window = self.bbu_summary_window
+        try:
+            if window is not None and window.winfo_exists():
+                window.close()
+        except tk.TclError:
+            self.bbu_summary_window = None
+
+    def on_bbu_query(self, res, ctrl, bbu_args, cv_args):
+        if ctrl != self.current_ctrl:
+            return
+        if self.query_has_result(res):
+            if self.open_battery_summary(res, ctrl):
+                return
+            show_structured(self, "BBU 信息", res, " ".join(bbu_args))
+            return
+        self.status_var.set(f"BBU 不可用，尝试查询 CacheVault: {' '.join(cv_args)}")
+        self.run_cmd(
+            cv_args,
+            lambda cv_res: self.on_cachevault_query(
+                cv_res, ctrl, res, bbu_args, cv_args),
+            ctrl=ctrl)
+
+    def on_cachevault_query(self, res, ctrl, bbu_res, bbu_args, cv_args):
+        if ctrl != self.current_ctrl:
+            return
+        if self.query_has_result(res):
+            if self.open_battery_summary(res, ctrl):
+                return
+            show_structured(self, "CacheVault 信息", res, " ".join(cv_args))
+            return
+        combined = []
+        for label, args, result in (
+                ("BBU", bbu_args, bbu_res),
+                ("CacheVault", cv_args, res)):
+            combined.append(f"===== {label}: storcli64 {' '.join(args)} =====")
+            if result.get("error"):
+                combined.append(f"错误: {result.get('error')}")
+            if result.get("stdout"):
+                combined.append(result["stdout"].rstrip())
+            if result.get("stderr"):
+                combined.append("--- stderr ---\n" + result["stderr"].rstrip())
+            combined.append("")
+        show_result_window(
+            self, "BBU / CacheVault 查询结果",
+            {"ok": False, "stdout": "\n".join(combined), "stderr": "",
+             "error": "未检测到可用的 BBU 或 CacheVault；请查看下方两次命令的原始返回。",
+             "code": 1, "elapsed": (
+                 float(bbu_res.get("elapsed", 0.0))
+                 + float(res.get("elapsed", 0.0)))},
+            "BBU show all J / CacheVault show all J")
+
+    def open_battery_summary(self, res, ctrl):
+        try:
+            payload = parse_json_output(res.get("stdout", ""))
+            data = parse_battery_payload(payload)
+        except Exception:
+            data = None
+        if not data:
+            return False
+        command = " ".join(res.get("args", []))
+        window = BatterySummaryWindow(self, ctrl, data, res, command)
+        self.bbu_summary_window = window
+        window.lift()
+        return True
 
     def op_alarm_show(self):
-        self.op("报警状态", lambda n: [f"/c{n}", "show", "alarm"])
+        self.query_controller(
+            "报警状态", lambda n: [f"/c{n}", "show", "alarm", "J"])
 
     def op_alarm_on(self):
         self.op("开启报警", lambda n: [f"/c{n}", "set", "alarm=on"], refresh=True)
@@ -6415,7 +7164,7 @@ class App:
             ("li", "· 顶部「设置...」可指定 storcli64.exe 位置；右下角可启用自动刷新并设置间隔。"),
             ("li", "· F1 打开本帮助, F5 刷新当前页面; 表格支持搜索、状态筛选、排序、导出和右键菜单。"),
             ("h2", "二、页面说明"),
-            ("li", "· 概览: 仪表盘式展示控制器属性、容量使用、后台操作、高级软件选项、固件版本与构建时间、物理盘列表。后台操作每 10 秒刷新，可通过「More Details」查看逐项进度和预计剩余时间。"),
+            ("li", "· 概览: 仪表盘式展示控制器属性、容量使用、后台操作、高级软件选项、固件版本与构建时间、物理盘列表。后台操作每 10 秒刷新，可通过「更多详情」查看逐项进度和预计剩余时间。"),
             ("li", "· 控制器: 包含「概览 / 详细属性 / 原始 JSON」子页；概览显示健康、固件、硬件和资源摘要，详细属性支持筛选。"),
             ("li", "· 虚拟盘: VD 列表; 支持搜索、状态筛选和 CSV 导出; 选中后可编辑/删除/查看详情。"),
             ("li", "· 物理盘: PD 列表; 右键可详情、定位灯、重建、状态设置、热备、SMART、错误计数、固件更新等。"),
@@ -6431,8 +7180,9 @@ class App:
             ("li", "· 定位灯: 右键物理盘 → 定位灯 开 / 关, 用于在机箱中识别硬盘位置。"),
             ("li", "· 固件更新: 物理盘批量固件更新会显示逐盘进度、当前目标、耗时和成功/失败结果。"),
             ("li", "· 外来配置: 控制器操作 → 查看 / 导入 / 删除外来配置, 用于迁移带旧 RAID 配置的磁盘。"),
+            ("li", "· 重新检测控制器: 重新运行控制器发现并刷新左侧控制器列表；StorCLI 本身没有独立的硬件总线 rescan 命令。"),
             ("li", "· 巡检 (Patrol Read): 控制器操作 → 开始 / 停止巡检、巡检状态。"),
-            ("li", "· BBU / CacheVault: 控制器操作 → BBU / CacheVault 信息, 查看电池/电容备份状态。"),
+            ("li", "· BBU / CacheVault: 控制器操作 → BBU / CacheVault 信息；先显示状态、温度、电容/电量和充电状态，点击「高级属性」查看制造信息、容量、学习设置及固件健康详情。"),
             ("li", "· 报警: 控制器操作 → 报警状态 / 开启报警 / 关闭报警。"),
             ("h2", "四、状态颜色"),
             ("li", "· 在线 (Onln) 显示为绿色; 故障 (Fault / Failed) 为红色; 重建 (Rebuild) 为橙色; 其余状态各有标识色。"),

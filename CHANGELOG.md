@@ -20,8 +20,12 @@ No unreleased changes.
   operations on the overview dashboard.
 - A scoped 10-second refresh cycle that appears only while the overview or
   background-operation details window is visible.
-- An MSM-style **More Details** window with per-operation target, progress,
+- An MSM-style **更多详情** window with per-operation target, progress,
   status, estimated time remaining and drive/array details.
+- MSM-style BBU/CacheVault summary window with type, health state, temperature,
+  capacitance/charge and charging status.
+- Advanced BBU/CacheVault property window with grouped manufacturing, runtime,
+  capacity, learning and firmware-health information.
 - StorCLI progress lookup for initialization, migration, BGI, consistency
   check, rebuild, copyback, patrol read and erase operations.
 - Indeterminate progress animation when an operation is active but the
@@ -32,6 +36,40 @@ No unreleased changes.
 - Background-operation refresh queries progress only for operations detected as
   active, avoiding unnecessary StorCLI calls when the controller is idle.
 - Completed and not-in-progress operations are removed from the active view.
+- Empty progress bars are hidden when no background operation is active.
+
+### Fixed
+
+- Controller-sidebar context menus now mark foreign-configuration changes,
+  controller firmware updates and full configuration deletion as dangerous.
+- BBU queries fall back to CacheVault and show the result or both raw responses
+  instead of only reporting a generic success.
+- Read-only alarm, patrol-read and foreign-configuration queries now open their
+  structured result window instead of discarding the returned values.
+- The invalid `/call rescan` action was replaced by controller re-detection.
+- Right-click menus are configured once when opened instead of reconfiguring
+  their active item on every mouse movement, eliminating hover refresh jitter
+  while preserving custom danger colors.
+- BBU/CacheVault summary and advanced windows close automatically when the
+  selected controller changes.
+- Firmware build date is read from the current controller properties and
+  `show all` output, and the previous cached value is cleared on every refresh.
+- When the command output omits the date, firmware term log is matched against
+  the current firmware version and the latest matching boot record is used.
+- Firmware term logs are now accepted only when their controller header matches
+  the selected controller, and stale queued tab queries are discarded when the
+  user switches controllers.
+- Multi-controller firmware-date parsing now handles `Mon DD, YYYY`,
+  `MM/DD/YYYY` and `YYYY/MM/DD` variants and tries Firmware Version, Firmware
+  Revision and Firmware Package Build candidates.
+- When a controller does not expose a firmware build date through StorCLI JSON,
+  `show all` or firmware term log, the version table now explicitly shows
+  `StorCLI 未提供` instead of omitting the row or guessing a date.
+- TMM and SCAP CacheVault module fields, including serial numbers,
+  manufacturing dates, PCB assembly numbers, PCB versions and battery-pack
+  assembly numbers, are localized.
+- Fixed a startup regression where the firmware-date cache logic was invoked
+  from `DataTab` and raised `DataTab object has no attribute _rd`.
 
 ## [1.5.8] - 2026-11-23
 
