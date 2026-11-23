@@ -21,7 +21,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_TITLE = "StorCLI GUI"
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.8"
 MONO_FONT = ("Consolas", 10)
 UI_FONT = ("Microsoft YaHei UI", 9)
 DANGER_COLOR = "#c62828"
@@ -31,6 +31,7 @@ TEXT_FG = "#202124"
 SELECT_BG = "#cce8ff"
 SELECT_FG = "#111111"
 HOVER_BG = "#dbeafe"
+ATTENTION_COLOR = "#b8860b"
 CREATE_NO_WINDOW = 0x08000000
 DEFAULT_TIMEOUT = 180
 
@@ -153,6 +154,22 @@ def tag_for_state(text):
         for word in words:
             if word in low:
                 return tag
+    return ""
+
+
+def controller_health_tag(text):
+    low = str(text or "").strip().lower()
+    if any(word in low for word in
+           ("failed", "failure", "critical", "error", "offline", "missing",
+            "unrecoverable", "dead")):
+        return "error"
+    if any(word in low for word in
+           ("needs attention", "attention", "warning", "degraded", "dgd",
+            "safe-mode", "rebuild", "rbld", "initializing", "copyback")):
+        return "attention"
+    if any(word in low for word in
+           ("optimal", "ok", "normal", "healthy", "online")):
+        return "good"
     return ""
 
 
@@ -1153,6 +1170,34 @@ def parse_pd_rows(payload):
     return drives
 
 
+def parse_pd_records(payload):
+    """Return physical-drive JSON rows keyed by a valid Enclosure:Slot address."""
+    records = []
+    seen = set()
+    for _title, _headers, rows in iter_tables(
+            payload["Controllers"][0].get("Response Data", {})):
+        for row in rows:
+            eid = slt = None
+            for key, value in row.items():
+                normalized = str(key).strip().upper()
+                if normalized in ("EID:SLT", "EID:SLOT"):
+                    match = re.match(r"\s*(\d+):(\d+)", str(value))
+                    if match:
+                        eid, slt = match.group(1), match.group(2)
+                elif normalized == "EID":
+                    eid = str(value).strip()
+                elif normalized in ("SLT", "SLOT"):
+                    slt = str(value).strip()
+            if eid is None or slt is None or not str(eid).isdigit() or not str(slt).isdigit():
+                continue
+            address = (str(eid), str(slt))
+            if address in seen:
+                continue
+            seen.add(address)
+            records.append(dict(row))
+    return records
+
+
 def is_ugood(state):
     low = str(state).lower()
     return (("ugood" in low or "unconfigured good" in low
@@ -1203,8 +1248,8 @@ def render_tables(tree, tables, row_data=None, heading_cmd=None):
     return all_headers
 
 
-def apply_danger_menu_colors(menu):
-    """Keep dangerous menu entries red while preserving the pale-blue hover background."""
+def apply_menu_item_colors(menu):
+    """Preserve custom entry colors while applying the pale-blue hover background."""
     menu.configure(activebackground=HOVER_BG, activeforeground=TEXT_FG)
     end = menu.index("end")
     if end is None:
@@ -1214,14 +1259,35 @@ def apply_danger_menu_colors(menu):
             if menu.type(index) == "cascade":
                 submenu = menu.entrycget(index, "menu")
                 if submenu:
-                    apply_danger_menu_colors(menu.nametowidget(submenu))
+                    apply_menu_item_colors(menu.nametowidget(submenu))
             foreground = str(menu.entrycget(index, "foreground"))
-            if foreground.casefold() == DANGER_COLOR.casefold():
+            if foreground:
                 menu.entryconfigure(
                     index, activebackground=HOVER_BG,
-                    activeforeground=DANGER_COLOR)
+                    activeforeground=foreground)
         except tk.TclError:
             continue
+    if not getattr(menu, "_color_select_bound", False):
+        menu.bind(
+            "<<MenuSelect>>",
+            lambda _event, current_menu=menu:
+                apply_active_menu_item_color(current_menu),
+            add="+")
+        menu._color_select_bound = True
+
+
+def apply_active_menu_item_color(menu):
+    active = menu.index("active")
+    if active is None:
+        return
+    try:
+        foreground = str(menu.entrycget(active, "foreground"))
+        if foreground:
+            menu.entryconfigure(
+                active, activebackground=HOVER_BG,
+                activeforeground=foreground)
+    except tk.TclError:
+        pass
 
 
 def bind_context_menu(widget, build_entries):
@@ -1250,7 +1316,7 @@ def bind_context_menu(widget, build_entries):
                                          foreground=DANGER_COLOR)
                     else:
                         menu.add_command(label=item[0], command=item[1])
-            apply_danger_menu_colors(menu)
+            apply_menu_item_colors(menu)
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
@@ -2417,6 +2483,593 @@ def fmt_size(num):
             return f"{int(num)} B" if unit == "B" else f"{num:.1f} {unit}"
         num /= 1000.0
     return f"{num:.1f} PB"
+
+
+class ExpandVdDialog(tk.Toplevel):
+    """Expand an existing virtual drive inside its current or expanded array."""
+
+    def __init__(self, app, ctrl, vd_index, row, expansion=None):
+        super().__init__(app.root)
+        self.app = app
+        self.ctrl = ctrl
+        self.vd_index = vd_index
+        self.row = row
+        self.expansion = expansion or {}
+        self.title(f"扩容虚拟驱动器 - 控制器 {ctrl} / VD {vd_index}")
+        self.geometry("680x470")
+        self.minsize(620, 430)
+        self.transient(app.root)
+
+        current_text = fmt_cell(row.get("Size")) or "-"
+        raid = fmt_cell(row.get("TYPE")) or "-"
+        current_bytes = parse_size_bytes(current_text)
+        self.current_mb = current_bytes / 1_000_000 if current_bytes else 0
+        self.no_array_max = parse_size_bytes(self.expansion.get("NoArrExp", ""))
+        self.with_array_max = parse_size_bytes(self.expansion.get("WithArrExp", ""))
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=12, pady=(12, 6))
+        ttk.Label(
+            top, text=f"控制器 {ctrl} · VD {vd_index} · {raid}",
+            font=(UI_FONT[0], UI_FONT[1] + 2, "bold")).pack(anchor="w")
+        ttk.Label(
+            top, text=f"当前容量: {current_text}",
+            font=UI_FONT).pack(anchor="w", pady=(4, 0))
+
+        info = ttk.LabelFrame(self, text="可扩容信息")
+        info.pack(fill="x", padx=12, pady=6)
+        no_text = fmt_size(self.no_array_max) if self.no_array_max else "未知/不可用"
+        with_text = fmt_size(self.with_array_max) if self.with_array_max else "未知/不可用"
+        ttk.Label(info, text=f"不扩展阵列最大容量: {no_text}").pack(
+            anchor="w", padx=8, pady=(5, 1))
+        ttk.Label(info, text=f"允许扩展阵列时最大容量: {with_text}").pack(
+            anchor="w", padx=8, pady=1)
+        oce = str(self.expansion.get("OCE", "")).strip()
+        if oce:
+            ttk.Label(info, text=f"OCE: {tr_state(oce)}").pack(
+                anchor="w", padx=8, pady=(1, 5))
+
+        form = ttk.LabelFrame(self, text="扩容参数")
+        form.pack(fill="x", padx=12, pady=6)
+        row_frame = ttk.Frame(form)
+        row_frame.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(row_frame, text="目标总容量 (MB):").pack(side="left")
+        self.size_var = tk.StringVar()
+        ttk.Entry(row_frame, textvariable=self.size_var, width=18).pack(
+            side="left", padx=8)
+        ttk.Label(row_frame, text="输入扩容后的 VD 总容量").pack(side="left")
+        self.expand_array_var = tk.BooleanVar(
+            value=bool(self.with_array_max > self.no_array_max))
+        ttk.Checkbutton(
+            form, text="允许扩展阵列 (expandarray)",
+            variable=self.expand_array_var).pack(anchor="w", padx=8, pady=(2, 8))
+
+        self.preview_var = tk.StringVar()
+        ttk.Label(
+            self, textvariable=self.preview_var, font=MONO_FONT,
+            foreground="#1565c0", wraplength=630, justify="left").pack(
+                fill="x", padx=12, pady=6)
+        self.validation_var = tk.StringVar()
+        self.validation_lbl = ttk.Label(
+            self, textvariable=self.validation_var, wraplength=630, justify="left")
+        self.validation_lbl.pack(fill="x", padx=12)
+        ttk.Label(
+            self,
+            text=("注意: 扩容可能持续较长时间。操作期间不要断电、重启或拔盘；"
+                  "请先确认已有可用备份，并在维护窗口执行。"),
+            foreground=DANGER_COLOR, wraplength=630, justify="left").pack(
+                fill="x", padx=12, pady=(8, 4))
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=12, pady=(8, 12))
+        ttk.Button(bar, text="开始扩容", command=self.submit).pack(side="right")
+        ttk.Button(bar, text="取消", command=self.destroy).pack(
+            side="right", padx=8)
+        self.size_var.trace_add("write", lambda *_: self.update_preview())
+        self.expand_array_var.trace_add("write", lambda *_: self.update_preview())
+        self.update_preview()
+
+    @staticmethod
+    def parse_expansion_result(res, vd_index):
+        if not res.get("ok"):
+            return {}
+        try:
+            payload = parse_json_output(res.get("stdout", ""))
+            data = payload["Controllers"][0].get("Response Data", {}) or {}
+            for _title, _headers, rows in iter_tables(data):
+                for row in rows:
+                    normalized = {
+                        str(key).strip().casefold(): value for key, value in row.items()
+                    }
+                    try:
+                        row_vd = int(normalized.get("vd", -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if row_vd == vd_index:
+                        return {
+                            "Size": normalized.get("size", ""),
+                            "OCE": normalized.get("oce", ""),
+                            "NoArrExp": normalized.get("noarrexp", ""),
+                            "WithArrExp": normalized.get("witharrexp", ""),
+                            "Status": normalized.get("status", ""),
+                        }
+        except Exception:
+            pass
+        return {}
+
+    def preview_command(self):
+        size = self.size_var.get().strip()
+        if not size:
+            return ""
+        args = [f"/c{self.ctrl}/v{self.vd_index}", "expand", f"size={size}"]
+        if self.expand_array_var.get():
+            args.append("expandarray")
+        return "storcli64 " + " ".join(args)
+
+    def validate(self):
+        try:
+            target_mb = float(self.size_var.get().strip())
+        except ValueError:
+            return None, "请输入数字形式的目标总容量，单位为 MB。"
+        if target_mb <= 0:
+            return None, "目标容量必须大于 0 MB。"
+        target_bytes = int(target_mb * 1_000_000)
+        if self.current_mb and target_mb <= self.current_mb:
+            return None, "目标容量必须大于当前 VD 容量。"
+        limit = self.with_array_max if self.expand_array_var.get() else self.no_array_max
+        if limit and target_bytes > limit:
+            mode = "允许扩展阵列" if self.expand_array_var.get() else "不扩展阵列"
+            return None, (
+                f"目标容量超过{mode}时报告的最大容量 {fmt_size(limit)}。")
+        state = str(self.row.get("State", "")).lower()
+        if state and not any(word in state for word in ("optl", "optimal", "opt")):
+            return None, "仅建议对 Optimal/Optl 状态的虚拟盘执行扩容。"
+        size_arg = f"{target_mb:.6f}".rstrip("0").rstrip(".")
+        args = [f"/c{self.ctrl}/v{self.vd_index}", "expand", f"size={size_arg}"]
+        if self.expand_array_var.get():
+            args.append("expandarray")
+        return args, None
+
+    def update_preview(self):
+        self.preview_var.set(self.preview_command())
+        _args, error = self.validate()
+        if error:
+            self.validation_var.set("无法开始: " + error)
+            self.validation_lbl.config(foreground=DANGER_COLOR)
+        else:
+            self.validation_var.set("参数检查通过")
+            self.validation_lbl.config(foreground="#0a7d32")
+
+    def submit(self):
+        args, error = self.validate()
+        if error:
+            messagebox.showinfo("扩容虚拟驱动器", error, parent=self)
+            return
+        command = "storcli64 " + " ".join(args)
+        if not messagebox.askyesno(
+                "扩容虚拟驱动器",
+                "扩容会修改 VD 容量并可能触发长时间 OCE。\n"
+                "操作期间不要断电、重启或拔盘。\n\n"
+                f"将执行:\n{command}\n\n确认开始扩容?",
+                icon="warning", parent=self):
+            return
+        if not messagebox.askyesno(
+                "扩容虚拟驱动器",
+                f"最后确认: 将 VD {self.vd_index} 扩容到 "
+                f"{self.size_var.get().strip()} MB?",
+                icon="warning", parent=self):
+            return
+        if self.app.run_vd_expand(args, self.ctrl):
+            self.destroy()
+
+
+class ModifyDriveGroupDialog(tk.Toplevel):
+    """MSM-style Modify Drive Group: RAID migration, adding drives and capacity expansion."""
+
+    RAID_ORDER = ("RAID0", "RAID1", "RAID5", "RAID6", "RAID10", "RAID50", "RAID60")
+
+    def __init__(self, app, ctrl, vd_index, row, drives, current_dg, expansion=None):
+        super().__init__(app.root)
+        self.app = app
+        self.ctrl = ctrl
+        self.vd_index = vd_index
+        self.row = row
+        self.drives = drives
+        self.current_dg = str(current_dg).strip()
+        self.expansion = expansion or {}
+        self.title(f"修改磁盘组 - 控制器 {ctrl} / VD {vd_index}")
+        self.geometry("780x760")
+        self.minsize(700, 620)
+        self.transient(app.root)
+
+        self.current_raid = self.normalize_raid(row.get("TYPE", ""))
+        self.current_members = [
+            drive for drive in drives
+            if str(self.drive_value(drive, "DG", "")).strip() == self.current_dg
+            and not is_ugood(self.drive_value(drive, "State", ""))
+        ]
+        self.addable_drives = [
+            drive for drive in drives
+            if is_ugood(self.drive_value(drive, "State", ""))
+        ]
+        current_text = fmt_cell(row.get("Size")) or "-"
+        current_bytes = parse_size_bytes(current_text)
+        self.current_mb = current_bytes / 1_000_000 if current_bytes else 0
+        self.no_array_max = parse_size_bytes(self.expansion.get("NoArrExp", ""))
+        self.with_array_max = parse_size_bytes(self.expansion.get("WithArrExp", ""))
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=12, pady=(12, 6))
+        ttk.Label(
+            top,
+            text=f"控制器 {ctrl} · 磁盘组 {self.current_dg or '-'} · "
+                 f"VD {vd_index} · {self.current_raid or '-'}",
+            font=(UI_FONT[0], UI_FONT[1] + 2, "bold")).pack(anchor="w")
+        ttk.Label(
+            top, text=f"当前容量: {current_text} · 当前成员盘: "
+                      f"{len(self.current_members)} 块",
+            font=UI_FONT).pack(anchor="w", pady=(4, 0))
+
+        self.tabs = ttk.Notebook(self)
+        self.tabs.pack(fill="both", expand=True, padx=10, pady=6)
+        self.migration_page = ttk.Frame(self.tabs)
+        self.capacity_page = ttk.Frame(self.tabs)
+        self.tabs.add(self.migration_page, text="  RAID / 添加磁盘  ")
+        self.tabs.add(self.capacity_page, text="  仅扩容容量  ")
+
+        self.build_migration_page()
+        self.build_capacity_page()
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(bar, text="关闭", command=self.destroy).pack(side="right")
+        self.update_migration()
+        self.update_expansion()
+
+    @staticmethod
+    def normalize_raid(value):
+        text = str(value).strip().upper().replace(" ", "")
+        return text if text.startswith("RAID") else f"RAID{text}"
+
+    @staticmethod
+    def drive_value(drive, key, default=""):
+        for source, value in drive.items():
+            if str(source).strip().casefold() == str(key).casefold():
+                return value
+        return default
+
+    @classmethod
+    def drive_address(cls, drive):
+        address = cls.drive_value(drive, "EID:Slt", "")
+        match = re.match(r"\s*(\d+):(\d+)", str(address))
+        if match:
+            return match.group(1), match.group(2)
+        eid = str(cls.drive_value(drive, "EID", "")).strip()
+        slot = str(cls.drive_value(drive, "SLT", cls.drive_value(drive, "Slot", ""))).strip()
+        return eid, slot
+
+    @classmethod
+    def drive_label(cls, drive):
+        eid, slot = cls.drive_address(drive)
+        return (
+            f"{eid}:{slot}  {cls.drive_value(drive, 'Size', '-')}  "
+            f"{cls.drive_value(drive, 'Model', '-')}"
+        )
+
+    @staticmethod
+    def allowed_raids(count):
+        allowed = []
+        if count >= 1:
+            allowed.append("RAID0")
+        if count == 2:
+            allowed.append("RAID1")
+        if count >= 3:
+            allowed.append("RAID5")
+        if count >= 4:
+            allowed.append("RAID6")
+        if count >= 4 and count % 2 == 0:
+            allowed.append("RAID10")
+        if count >= 6:
+            allowed.append("RAID50")
+        if count >= 8:
+            allowed.append("RAID60")
+        return allowed
+
+    @staticmethod
+    def recommended_raid(allowed):
+        for raid in ("RAID6", "RAID10", "RAID5", "RAID1", "RAID50", "RAID60", "RAID0"):
+            if raid in allowed:
+                return raid
+        return allowed[0] if allowed else ""
+
+    @staticmethod
+    def estimate_usable(raid, sizes):
+        sizes = [size for size in sizes if size > 0]
+        if not sizes:
+            return 0
+        minimum = min(sizes)
+        count = len(sizes)
+        if raid == "RAID0":
+            return minimum * count
+        if raid == "RAID1":
+            return minimum
+        if raid == "RAID5":
+            return minimum * max(0, count - 1)
+        if raid == "RAID6":
+            return minimum * max(0, count - 2)
+        if raid == "RAID10":
+            return minimum * (count // 2)
+        if raid == "RAID50":
+            return minimum * max(0, count - 2)
+        if raid == "RAID60":
+            return minimum * max(0, count - 4)
+        return minimum * count
+
+    def build_migration_page(self):
+        page = self.migration_page
+        current = ttk.LabelFrame(page, text="当前磁盘组成员")
+        current.pack(fill="x", padx=6, pady=(6, 3))
+        member_text = (
+            "  ".join(self.drive_label(drive) for drive in self.current_members)
+            if self.current_members else "(无法读取当前磁盘组成员)"
+        )
+        ttk.Label(
+            current, text=member_text, wraplength=700,
+            justify="left").pack(fill="x", padx=8, pady=6)
+
+        form = ttk.LabelFrame(page, text="修改目标")
+        form.pack(fill="both", expand=True, padx=6, pady=3)
+        row_frame = ttk.Frame(form)
+        row_frame.pack(fill="x", padx=8, pady=(8, 3))
+        ttk.Label(row_frame, text="目标 RAID:").pack(side="left")
+        self.raid_var = tk.StringVar(value=self.current_raid)
+        self.raid_combo = ttk.Combobox(
+            row_frame, textvariable=self.raid_var, state="readonly", width=12)
+        self.raid_combo.pack(side="left", padx=8)
+        self.migration_summary_var = tk.StringVar()
+        ttk.Label(row_frame, textvariable=self.migration_summary_var).pack(
+            side="left", padx=8)
+
+        ttk.Label(
+            form, text="添加未配置(Good)物理盘:",
+            font=UI_FONT).pack(anchor="w", padx=8, pady=(7, 2))
+        list_frame = ttk.Frame(form)
+        list_frame.pack(fill="both", expand=True, padx=8, pady=2)
+        self.add_canvas = tk.Canvas(
+            list_frame, height=125, highlightthickness=0, background=CONTENT_BG)
+        add_vsb = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self.add_canvas.yview)
+        self.add_inner = ttk.Frame(self.add_canvas)
+        add_window = self.add_canvas.create_window(
+            (0, 0), window=self.add_inner, anchor="nw")
+        self.add_inner.bind(
+            "<Configure>",
+            lambda _event: self.add_canvas.configure(
+                scrollregion=self.add_canvas.bbox("all")))
+        self.add_canvas.bind(
+            "<Configure>",
+            lambda event: self.add_canvas.itemconfig(add_window, width=event.width))
+        self.add_canvas.configure(yscrollcommand=add_vsb.set)
+        self.add_canvas.pack(side="left", fill="both", expand=True)
+        add_vsb.pack(side="right", fill="y")
+        self.add_vars = []
+        if self.addable_drives:
+            for drive in self.addable_drives:
+                var = tk.BooleanVar(value=False)
+                self.add_vars.append(var)
+                ttk.Checkbutton(
+                    self.add_inner, text=self.drive_label(drive),
+                    variable=var, command=self.update_migration).pack(
+                        anchor="w", padx=4, pady=1)
+        else:
+            ttk.Label(
+                self.add_inner, text="(没有可添加的未配置 Good 磁盘)"
+            ).pack(anchor="w", padx=4, pady=6)
+        self.add_canvas.bind(
+            "<MouseWheel>",
+            lambda event: self.add_canvas.yview_scroll(
+                int(-event.delta / 120), "units"))
+        self.add_inner.bind(
+            "<MouseWheel>",
+            lambda event: self.add_canvas.yview_scroll(
+                int(-event.delta / 120), "units"))
+
+        self.migration_preview_var = tk.StringVar()
+        ttk.Label(
+            form, textvariable=self.migration_preview_var, font=MONO_FONT,
+            foreground="#1565c0", wraplength=700, justify="left").pack(
+                fill="x", padx=8, pady=(6, 3))
+        self.migration_validation_var = tk.StringVar()
+        self.migration_validation_lbl = ttk.Label(
+            form, textvariable=self.migration_validation_var,
+            wraplength=700, justify="left")
+        self.migration_validation_lbl.pack(fill="x", padx=8)
+        ttk.Label(
+            form,
+            text=("RAID 迁移和添加磁盘会触发长时间后台迁移，期间不要断电或拔盘。"
+                  "请先完成备份，并在维护窗口执行。"),
+            foreground=DANGER_COLOR, wraplength=700, justify="left").pack(
+                fill="x", padx=8, pady=(6, 3))
+        ttk.Button(
+            form, text="执行 RAID / 添加磁盘",
+            command=self.submit_migration).pack(anchor="e", padx=8, pady=(4, 8))
+        self.raid_var.trace_add("write", lambda *_: self.update_migration())
+
+    def build_capacity_page(self):
+        page = self.capacity_page
+        info = ttk.LabelFrame(page, text="可扩容信息")
+        info.pack(fill="x", padx=6, pady=(6, 3))
+        no_text = fmt_size(self.no_array_max) if self.no_array_max else "未知/不可用"
+        with_text = fmt_size(self.with_array_max) if self.with_array_max else "未知/不可用"
+        ttk.Label(info, text=f"不扩展阵列最大容量: {no_text}").pack(
+            anchor="w", padx=8, pady=(5, 1))
+        ttk.Label(info, text=f"允许扩展阵列时最大容量: {with_text}").pack(
+            anchor="w", padx=8, pady=(1, 5))
+
+        form = ttk.LabelFrame(page, text="扩容参数")
+        form.pack(fill="x", padx=6, pady=3)
+        row_frame = ttk.Frame(form)
+        row_frame.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(row_frame, text="目标总容量 (MB):").pack(side="left")
+        self.size_var = tk.StringVar()
+        ttk.Entry(row_frame, textvariable=self.size_var, width=18).pack(
+            side="left", padx=8)
+        ttk.Label(row_frame, text="输入扩容后的 VD 总容量").pack(side="left")
+        self.expand_array_var = tk.BooleanVar(
+            value=bool(self.with_array_max > self.no_array_max))
+        ttk.Checkbutton(
+            form, text="允许扩展阵列 (expandarray)",
+            variable=self.expand_array_var).pack(anchor="w", padx=8, pady=(2, 8))
+        self.expansion_preview_var = tk.StringVar()
+        ttk.Label(
+            page, textvariable=self.expansion_preview_var, font=MONO_FONT,
+            foreground="#1565c0", wraplength=700, justify="left").pack(
+                fill="x", padx=12, pady=(8, 4))
+        self.expansion_validation_var = tk.StringVar()
+        self.expansion_validation_lbl = ttk.Label(
+            page, textvariable=self.expansion_validation_var,
+            wraplength=700, justify="left")
+        self.expansion_validation_lbl.pack(fill="x", padx=12)
+        ttk.Button(
+            page, text="仅扩容容量",
+            command=self.submit_expansion).pack(anchor="e", padx=12, pady=12)
+        self.size_var.trace_add("write", lambda *_: self.update_expansion())
+        self.expand_array_var.trace_add("write", lambda *_: self.update_expansion())
+
+    def selected_additions(self):
+        return [
+            drive for drive, var in zip(self.addable_drives, self.add_vars)
+            if var.get()
+        ]
+
+    def update_migration(self):
+        additions = self.selected_additions()
+        total_count = len(self.current_members) + len(additions)
+        allowed = self.allowed_raids(total_count)
+        current_value = self.raid_var.get()
+        if current_value not in allowed:
+            if self.current_raid in allowed:
+                current_value = self.current_raid
+            else:
+                current_value = self.recommended_raid(allowed)
+            self.raid_var.set(current_value)
+        self.raid_combo.configure(values=allowed)
+        sizes = [
+            parse_size_bytes(self.drive_value(drive, "Size", ""))
+            for drive in self.current_members + additions
+        ]
+        usable = self.estimate_usable(current_value, sizes)
+        self.migration_summary_var.set(
+            f"迁移后成员盘 {total_count} 块 · 预计可用 {fmt_size(usable) if usable else '-'}")
+        args, error = self.migration_args()
+        self.migration_preview_var.set(
+            "storcli64 " + " ".join(args) if args else "")
+        if error:
+            self.migration_validation_var.set("无法开始: " + error)
+            self.migration_validation_lbl.config(foreground=DANGER_COLOR)
+        else:
+            self.migration_validation_var.set("参数检查通过")
+            self.migration_validation_lbl.config(foreground="#0a7d32")
+
+    def migration_args(self):
+        if not self.current_members:
+            return None, "无法读取当前磁盘组成员，不能执行 RAID 迁移。"
+        state = str(self.row.get("State", "")).lower()
+        if state and not any(word in state for word in ("optl", "optimal", "opt")):
+            return None, "仅建议对 Optimal/Optl 状态的虚拟盘执行迁移。"
+        additions = self.selected_additions()
+        total_count = len(self.current_members) + len(additions)
+        allowed = self.allowed_raids(total_count)
+        desired = self.raid_var.get()
+        if desired not in allowed:
+            return None, f"{desired or '当前 RAID'} 不适用于 {total_count} 块成员盘。"
+        if desired == self.current_raid and not additions:
+            return None, "RAID 级别和成员盘数量均未改变。"
+        args = [
+            f"/c{self.ctrl}/v{self.vd_index}", "start", "migrate",
+            f"type={desired.lower()}",
+        ]
+        if additions:
+            drives = ",".join(
+                f"{eid}:{slot}" for eid, slot in
+                (self.drive_address(drive) for drive in additions))
+            args.extend(["option=add", f"drives={drives}"])
+        return args, None
+
+    def submit_migration(self):
+        args, error = self.migration_args()
+        if error:
+            messagebox.showinfo("修改磁盘组", error, parent=self)
+            return
+        command = "storcli64 " + " ".join(args)
+        if not messagebox.askyesno(
+                "修改磁盘组",
+                "该操作会启动 RAID 迁移/成员盘变更，可能持续数小时。\n"
+                "操作期间不要断电、重启或拔盘。\n\n"
+                f"将执行:\n{command}\n\n确认开始?",
+                icon="warning", parent=self):
+            return
+        if not messagebox.askyesno(
+                "修改磁盘组", "最后确认: 启动磁盘组迁移?", icon="warning",
+                parent=self):
+            return
+        if self.app.run_vd_migration(args, self.ctrl):
+            self.destroy()
+
+    def expansion_args(self):
+        try:
+            target_mb = float(self.size_var.get().strip())
+        except ValueError:
+            return None, "请输入数字形式的目标总容量，单位为 MB。"
+        if target_mb <= 0:
+            return None, "目标容量必须大于 0 MB。"
+        target_bytes = int(target_mb * 1_000_000)
+        if self.current_mb and target_mb <= self.current_mb:
+            return None, "目标容量必须大于当前 VD 容量。"
+        limit = self.with_array_max if self.expand_array_var.get() else self.no_array_max
+        if limit and target_bytes > limit:
+            mode = "允许扩展阵列" if self.expand_array_var.get() else "不扩展阵列"
+            return None, f"目标容量超过{mode}时报告的最大容量 {fmt_size(limit)}。"
+        state = str(self.row.get("State", "")).lower()
+        if state and not any(word in state for word in ("optl", "optimal", "opt")):
+            return None, "仅建议对 Optimal/Optl 状态的虚拟盘执行扩容。"
+        size_arg = f"{target_mb:.6f}".rstrip("0").rstrip(".")
+        args = [f"/c{self.ctrl}/v{self.vd_index}", "expand", f"size={size_arg}"]
+        if self.expand_array_var.get():
+            args.append("expandarray")
+        return args, None
+
+    def update_expansion(self):
+        args, error = self.expansion_args()
+        self.expansion_preview_var.set(
+            "storcli64 " + " ".join(args) if args else "")
+        if error:
+            self.expansion_validation_var.set("无法开始: " + error)
+            self.expansion_validation_lbl.config(foreground=DANGER_COLOR)
+        else:
+            self.expansion_validation_var.set("参数检查通过")
+            self.expansion_validation_lbl.config(foreground="#0a7d32")
+
+    def submit_expansion(self):
+        args, error = self.expansion_args()
+        if error:
+            messagebox.showinfo("扩容容量", error, parent=self)
+            return
+        command = "storcli64 " + " ".join(args)
+        if not messagebox.askyesno(
+                "扩容容量",
+                "扩容可能触发长时间 OCE，操作期间不要断电或拔盘。\n\n"
+                f"将执行:\n{command}\n\n确认开始?",
+                icon="warning", parent=self):
+            return
+        if not messagebox.askyesno(
+                "扩容容量",
+                f"最后确认: 将 VD {self.vd_index} 扩容到 "
+                f"{self.size_var.get().strip()} MB?",
+                icon="warning", parent=self):
+            return
+        if self.app.run_vd_expand(args, self.ctrl):
+            self.destroy()
 
 
 class OverviewTab:
@@ -3715,6 +4368,7 @@ class App:
         self._restore_redraw_job = None
         self.current_ctrl = None
         self.controllers = []
+        self.controller_health = {}
         self.last_path = None
         self.worker = Worker(self)
         self.worker.start()
@@ -3761,7 +4415,7 @@ class App:
         style.map(
             "Treeview",
             background=[("selected", SELECT_BG)],
-            foreground=[("selected", SELECT_FG)])
+            foreground=[])
         style.configure("TNotebook", background=WINDOW_BG)
         style.configure("TNotebook.Tab", foreground=TEXT_FG)
         self.build_ui()
@@ -3871,6 +4525,9 @@ class App:
         self.sidebar = ttk.Treeview(left, show="tree", selectmode="browse", height=14)
         self.sidebar.pack(fill="both", expand=True)
         self.sidebar.bind("<<TreeviewSelect>>", self.on_ctrl_select)
+        self.sidebar.tag_configure("good", foreground="#0a7d32")
+        self.sidebar.tag_configure("attention", foreground=ATTENTION_COLOR)
+        self.sidebar.tag_configure("error", foreground=DANGER_COLOR)
         self.ctrl_info_var = tk.StringVar(value="")
         ttk.Label(left, textvariable=self.ctrl_info_var, font=UI_FONT, wraplength=260,
                   justify="left").pack(anchor="w", pady=(6, 0))
@@ -3882,6 +4539,7 @@ class App:
         self.tab_ctrl = ControllerTab(self.nb, self)
         self.tab_vd = DataTab(self.nb, self, lambda n: [f"/c{n}/vall", "show"], buttons=(
             ("详情", self.vd_details),
+            ("修改磁盘组...", self.vd_expand),
             ("初始化(快)", lambda: self.vd_init("fast"), "danger"),
             ("初始化(全)", lambda: self.vd_init("full"), "danger"),
             ("删除", self.vd_delete, "danger"),
@@ -3935,6 +4593,7 @@ class App:
             ("复制行", lambda: self._copy_tree_row(self.tab_overview.tbl_tree))])
         bind_context_menu(self.tab_vd.tree, lambda: [
             ("详情", self.vd_details),
+            ("修改磁盘组...", self.vd_expand),
             ("初始化(快)", lambda: self.vd_init("fast"), "danger"),
             ("初始化(全)", lambda: self.vd_init("full"), "danger"),
             ("删除...", self.vd_delete, "danger"),
@@ -4015,6 +4674,7 @@ class App:
         vdm = tk.Menu(menubar, tearoff=0)
         vdm.add_command(label="创建虚拟驱动器...", command=self.create_vd)
         vdm.add_command(label="虚拟驱动器详情", command=self.vd_details)
+        vdm.add_command(label="修改磁盘组...", command=self.vd_expand)
         vdm.add_command(label="删除虚拟驱动器...", command=self.vd_delete, foreground=DANGER_COLOR)
         menubar.add_cascade(label="虚拟驱动器", menu=vdm)
         helpm = tk.Menu(menubar, tearoff=0)
@@ -4022,7 +4682,7 @@ class App:
         helpm.add_command(label="打开 StorCLI 所在目录", command=self.open_folder)
         helpm.add_command(label="关于", command=self.about)
         menubar.add_cascade(label="帮助", menu=helpm)
-        apply_danger_menu_colors(menubar)
+        apply_menu_item_colors(menubar)
         self.root.config(menu=menubar)
 
     # -- 命令执行
@@ -4110,6 +4770,7 @@ class App:
         self.controller_refresh_seq += 1
         seq = self.controller_refresh_seq
         self.controllers = []
+        self.controller_health = {}
         self.current_ctrl = None
         self.sidebar.delete(*self.sidebar.get_children())
         self.ctrl_info_var.set("正在检测控制器...")
@@ -4196,12 +4857,46 @@ class App:
         for cid, model in found:
             self.sidebar.insert("", "end", iid=f"c{cid}",
                                 text=f"控制器 {cid}    {model}".strip())
+        self.refresh_controller_healths(found, seq)
         first = found[0][0]
         self.sidebar.selection_set(f"c{first}")
         self.sidebar.focus(f"c{first}")
         self.current_ctrl = first
         self.ctrl_info_var.set(f"共发现 {len(found)} 个控制器")
         self.reload_tabs()
+
+    def refresh_controller_healths(self, found, seq):
+        for cid, _model in found:
+            self.run_cmd(
+                [f"/c{cid}", "show", "all", "J"],
+                lambda res, controller_id=cid, request_seq=seq:
+                    self.on_controller_health(res, controller_id, request_seq),
+                timeout=DEFAULT_TIMEOUT, ctrl=cid)
+
+    def on_controller_health(self, res, cid, seq):
+        if seq != self.controller_refresh_seq:
+            return
+        status = ""
+        if res.get("ok"):
+            try:
+                payload = parse_json_output(res.get("stdout", ""))
+                rd = payload["Controllers"][0].get("Response Data", {}) or {}
+                status_block = rd.get("Status", {})
+                if isinstance(status_block, dict):
+                    status = str(status_block.get("Controller Status", "")).strip()
+            except Exception:
+                pass
+            if not status:
+                match = re.search(
+                    r"Controller Status\s*[:=]\s*([^\r\n]+)",
+                    res.get("stdout", "") or "", re.I)
+                if match:
+                    status = match.group(1).strip()
+        tag = controller_health_tag(status)
+        self.controller_health[cid] = status
+        item_id = f"c{cid}"
+        if self.sidebar.exists(item_id):
+            self.sidebar.item(item_id, tags=(tag,) if tag else ())
 
     def on_ctrl_select(self, _event=None):
         sel = self.sidebar.selection()
@@ -4273,6 +4968,8 @@ class App:
         elif tab is self.tab_vd:
             enabled = {
                 "详情": bool(row),
+                "修改磁盘组...": bool(row) and any(
+                    word in state for word in ("optl", "optimal", "opt")),
                 "初始化(快)": bool(row) and not any(
                     word in state for word in ("init", "rbld", "rebuild")),
                 "初始化(全)": bool(row) and not any(
@@ -4541,6 +5238,91 @@ class App:
         args = [f"/c{ctrl}/v{idx}", "show", "all", "J"]
         self.run_cmd(args, lambda res: show_structured(self, f"虚拟盘 {idx} 详情", res, " ".join(args)),
                      ctrl=ctrl)
+
+    def vd_expand(self):
+        target = self.vd_index()
+        if target is None:
+            return
+        ctrl, idx = target
+        row = self.tab_vd.selected_dict()
+        if row is None:
+            return
+        if not messagebox.askyesno(
+                "修改磁盘组 - 风险警告",
+                "“修改磁盘组”可能执行 RAID 级别迁移、添加成员盘或扩容容量。\n\n"
+                "这些操作会触发长时间后台重建，期间不应断电、重启或拔盘。"
+                "操作前必须确认已有可用备份，并核对目标控制器、磁盘组和 VD。\n\n"
+                "是否继续进入修改向导?",
+                icon="warning", parent=self.root):
+            return
+        dg_text = str(row.get("DG/VD", row.get("DG", ""))).strip()
+        match = re.match(r"\s*(\d+)\s*/", dg_text)
+        current_dg = match.group(1) if match else dg_text.split("/", 1)[0].strip()
+        self.status_var.set(f"查询磁盘组 {current_dg or '-'} 的成员盘...")
+        args = [f"/c{ctrl}/eall/sall", "show", "J"]
+        self.run_cmd(
+            args,
+            lambda res: self.on_vd_modify_drives(
+                res, ctrl, idx, dict(row), current_dg),
+            timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+
+    def on_vd_modify_drives(self, res, ctrl, idx, row, current_dg):
+        if ctrl != self.current_ctrl:
+            return
+        drives = []
+        if res.get("ok"):
+            try:
+                drives = parse_pd_records(parse_json_output(res.get("stdout", "")))
+            except Exception:
+                drives = []
+        self.status_var.set(f"查询 VD {idx} 可扩容范围...")
+        args = [f"/c{ctrl}/v{idx}", "show", "expansion", "J"]
+        self.run_cmd(
+            args,
+            lambda expansion_res: self.on_vd_modify_expansion(
+                expansion_res, ctrl, idx, row, current_dg, drives),
+            timeout=DEFAULT_TIMEOUT, ctrl=ctrl)
+
+    def on_vd_modify_expansion(self, res, ctrl, idx, row, current_dg, drives):
+        if ctrl != self.current_ctrl:
+            return
+        expansion = ExpandVdDialog.parse_expansion_result(res, idx)
+        ModifyDriveGroupDialog(
+            self, ctrl, idx, row, drives, current_dg, expansion)
+
+    def run_vd_long_operation(self, title, args, ctrl):
+        if not self.begin_operation(title):
+            return False
+        task = TaskProgressDialog(self, title, 1)
+        task.update_step(1, f"控制器 {ctrl}，{title}")
+
+        def done(res):
+            try:
+                ok, desc = self.summarize(res)
+                task.add_result(
+                    f"控制器 {ctrl}", ok, desc,
+                    res.get("elapsed", 0.0), res)
+                task.finish(ok)
+                if ok:
+                    task.step_var.set(
+                        f"{title}命令已提交，请继续观察 VD / 物理盘状态")
+                    self.status_var.set(
+                        f"{title}命令已完成 · {time.strftime('%H:%M:%S')}")
+                    self.tab_vd.load()
+                    self.tab_pd.load()
+                    self.tab_ctrl.load()
+                    self.tab_overview.load()
+            finally:
+                self.end_operation()
+
+        self.run_cmd(args, done, timeout=7200, ctrl=ctrl)
+        return True
+
+    def run_vd_expand(self, args, ctrl):
+        return self.run_vd_long_operation("虚拟盘扩容", args, ctrl)
+
+    def run_vd_migration(self, args, ctrl):
+        return self.run_vd_long_operation("修改磁盘组", args, ctrl)
 
     def vd_init(self, mode):
         target = self.vd_index()
@@ -4975,6 +5757,7 @@ class App:
             ("li", "· 命令控制台: 手动输入并执行任意 storcli 参数, 适合高级用户。"),
             ("h2", "三、常用操作"),
             ("li", "· 创建虚拟驱动器: 选择磁盘和 RAID 后会实时检查最低磁盘数、容量和请求大小，并显示预计可用容量。"),
+            ("li", "· 修改磁盘组: 在虚拟盘页选择 VD 后点击「修改磁盘组...」；可根据当前和新增磁盘数量选择可用 RAID 级别、添加成员盘，或在第二个子页中仅扩容容量。"),
             ("li", "· 删除虚拟驱动器: 选中 VD 后操作, 需二次确认, 数据不可恢复!"),
             ("li", "· PD 状态设置: 右键物理盘 → 状态设置, 支持 Online / Offline / Missing / JBOD / Good; 涉及数据丢失的操作会给出红色警告。"),
             ("li", "· 热备盘: 右键物理盘 → 添加热备盘 / 删除热备盘；支持全局热备和指定磁盘组热备。"),

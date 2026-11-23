@@ -17,7 +17,8 @@ Download a StorCLI version compatible with your controller and place
 
 - Controller overview with health, firmware, hardware and resource summaries.
 - Localized controller detail view with searchable properties and raw JSON.
-- Virtual drive creation with RAID drive-count validation and capacity estimates.
+- MSM-style **Modify Drive Group** support with RAID migration, member-drive
+  addition, disk-count-aware RAID choices and capacity expansion.
 - Physical drive actions: locate, rebuild, state changes, hot spare, SMART,
   error counters and firmware update.
 - Searchable tables with state filters, horizontal scrolling, sorting and CSV export.
@@ -45,7 +46,8 @@ that changes controller configuration or overwrites data.
 
 ## Run from source
 
-Requirements: Python 3.8 or newer with Tkinter.
+Official builds use Python 3.15 with Tk 9.0. The source remains compatible with
+Python 3.8 or newer with Tkinter.
 
 ```powershell
 python storcli_gui.py
@@ -59,6 +61,9 @@ Alternatively, run `StorCLI-GUI.bat`.
 python -m pip install pyinstaller
 python tools/build_windows.py
 ```
+
+The official release executable is built with local Python 3.15 and the same
+version is used by GitHub Actions.
 
 The build script reads `APP_VERSION` and `APP_ICON_B64` from `storcli_gui.py`,
 generates the Windows version resource and ICO, then creates:
