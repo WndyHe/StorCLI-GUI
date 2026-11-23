@@ -21,7 +21,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_TITLE = "StorCLI GUI"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 MONO_FONT = ("Consolas", 10)
 UI_FONT = ("Microsoft YaHei UI", 9)
 DANGER_COLOR = "#c62828"
@@ -1203,6 +1203,27 @@ def render_tables(tree, tables, row_data=None, heading_cmd=None):
     return all_headers
 
 
+def apply_danger_menu_colors(menu):
+    """Keep dangerous menu entries red while preserving the pale-blue hover background."""
+    menu.configure(activebackground=HOVER_BG, activeforeground=TEXT_FG)
+    end = menu.index("end")
+    if end is None:
+        return
+    for index in range(end + 1):
+        try:
+            if menu.type(index) == "cascade":
+                submenu = menu.entrycget(index, "menu")
+                if submenu:
+                    apply_danger_menu_colors(menu.nametowidget(submenu))
+            foreground = str(menu.entrycget(index, "foreground"))
+            if foreground.casefold() == DANGER_COLOR.casefold():
+                menu.entryconfigure(
+                    index, activebackground=HOVER_BG,
+                    activeforeground=DANGER_COLOR)
+        except tk.TclError:
+            continue
+
+
 def bind_context_menu(widget, build_entries):
     """绑定右键菜单; build_entries() 返回 [(label, cmd), ...], 元素 "-" 表示分隔线."""
     menu = tk.Menu(
@@ -1229,6 +1250,7 @@ def bind_context_menu(widget, build_entries):
                                          foreground=DANGER_COLOR)
                     else:
                         menu.add_command(label=item[0], command=item[1])
+            apply_danger_menu_colors(menu)
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
@@ -4000,6 +4022,7 @@ class App:
         helpm.add_command(label="打开 StorCLI 所在目录", command=self.open_folder)
         helpm.add_command(label="关于", command=self.about)
         menubar.add_cascade(label="帮助", menu=helpm)
+        apply_danger_menu_colors(menubar)
         self.root.config(menu=menubar)
 
     # -- 命令执行
