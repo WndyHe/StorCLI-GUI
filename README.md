@@ -72,6 +72,10 @@ GitHub Actions runs static checks and a Windows build for every push and pull
 request. Pushing a `v*` tag also uploads the executable to the matching GitHub
 Release.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete version history.
+
 ## Safety notes
 
 - Firmware flashing and controller configuration changes are high-risk operations.
