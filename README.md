@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="storage-dcgg.png" width="96" alt="StorCLI GUI icon">
-</p>
-
 # StorCLI GUI
 
 [![Build and Release](https://github.com/WndyHe/StorCLI-GUI/actions/workflows/build-release.yml/badge.svg)](https://github.com/WndyHe/StorCLI-GUI/actions/workflows/build-release.yml)
