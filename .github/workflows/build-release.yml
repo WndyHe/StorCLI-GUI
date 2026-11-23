@@ -91,9 +91,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = "Continue"
           $tag = $env:GITHUB_REF_NAME
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --title "StorCLI GUI $tag" --generate-notes
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to create release $tag"
+            }
           }
           gh release upload $tag dist/StorCLI_GUI.exe --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to upload executable to release $tag"
+          }
