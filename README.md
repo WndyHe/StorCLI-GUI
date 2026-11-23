@@ -4,6 +4,8 @@
 
 # StorCLI GUI
 
+[![Build and Release](https://github.com/WndyHe/StorCLI-GUI/actions/workflows/build-release.yml/badge.svg)](https://github.com/WndyHe/StorCLI-GUI/actions/workflows/build-release.yml)
+
 Windows GUI for Broadcom MegaRAID StorCLI, designed for day-to-day controller,
 virtual drive, physical drive, enclosure and firmware management.
 
@@ -54,12 +56,20 @@ Alternatively, run `StorCLI-GUI.bat`.
 ## Build
 
 ```powershell
-pyinstaller --onefile --windowed --uac-admin `
-  --name StorCLI_GUI `
-  --icon <path-to-icon.ico> `
-  --version-file <path-to-version-info.txt> `
-  storcli_gui.py
+python -m pip install pyinstaller
+python tools/build_windows.py
 ```
+
+The build script reads `APP_VERSION` and `APP_ICON_B64` from `storcli_gui.py`,
+generates the Windows version resource and ICO, then creates:
+
+```text
+dist/StorCLI_GUI.exe
+```
+
+GitHub Actions runs static checks and a Windows build for every push and pull
+request. Pushing a `v*` tag also uploads the executable to the matching GitHub
+Release.
 
 ## Safety notes
 
