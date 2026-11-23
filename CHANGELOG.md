@@ -14,6 +14,9 @@ No unreleased changes.
 
 ## [1.5.9] - 2026-11-23
 
+This update adds live background-operation progress to the overview dashboard,
+MSM-style BBU/CacheVault information, and multi-controller refresh hardening.
+
 ### Added
 
 - Live progress bars for virtual-drive and physical-drive background
@@ -37,6 +40,7 @@ No unreleased changes.
   active, avoiding unnecessary StorCLI calls when the controller is idle.
 - Completed and not-in-progress operations are removed from the active view.
 - Empty progress bars are hidden when no background operation is active.
+- Official Windows builds and release artifacts use Python 3.15 and Tk 9.0.
 
 ### Fixed
 
@@ -70,6 +74,14 @@ No unreleased changes.
   assembly numbers, are localized.
 - Fixed a startup regression where the firmware-date cache logic was invoked
   from `DataTab` and raised `DataTab object has no attribute _rd`.
+
+### Release
+
+- Windows executable SHA256:
+  `BAD09121F0E84ED70F02B4B31BA42ACD10CDFFCECBA8B24BAEE200FC79ACF96C`.
+- Requires a supported Windows x64 system and administrator privileges.
+- Requires a compatible Broadcom `storcli64.exe`, which is supplied separately;
+  this release does not include or redistribute StorCLI.
 
 ## [1.5.8] - 2026-11-23
 
