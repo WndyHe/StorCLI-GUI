@@ -97,6 +97,8 @@ def build():
         str(ICON),
         "--version-file",
         str(VERSION_FILE),
+        "--add-data",
+        f"{ROOT / 'LICENSE'};.",
         "--distpath",
         str(DIST),
         "--workpath",
