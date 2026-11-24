@@ -12,6 +12,28 @@ All notable changes to StorCLI GUI are documented here. The format follows
 
 No unreleased changes.
 
+## [1.5.10] - 2026-11-24
+
+This maintenance release improves log searching and page action-state handling,
+and adds the full license to the About window.
+
+### Added
+
+- The About window now displays the full Apache License 2.0 text and provides a
+  button to copy the license.
+
+### Changed
+
+- Invalid page buttons are now disabled automatically when no controller is
+  selected, data has not loaded, no row is selected, a mode cannot be toggled,
+  or an exclusive operation is running.
+- Removed the export button from the Physical Drives page.
+
+### Fixed
+
+- The event-log search field now filters TTY raw-log lines in place, including
+  severity filtering and matching-line counts.
+
 ## [1.5.9] - 2026-11-23
 
 This update adds live background-operation progress to the overview dashboard,
@@ -281,7 +303,8 @@ MSM-style BBU/CacheVault information, and multi-controller refresh hardening.
 - Controller discovery, overview dashboard, VD/PD/enclosure tables, event log,
   command console and firmware update workflows.
 
-[Unreleased]: https://github.com/WndyHe/StorCLI-GUI/compare/v1.5.9...HEAD
+[Unreleased]: https://github.com/WndyHe/StorCLI-GUI/compare/v1.5.10...HEAD
+[1.5.10]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.10
 [1.5.9]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.9
 [1.5.8]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.8
 [1.5.4]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.4

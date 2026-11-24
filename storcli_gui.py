@@ -21,7 +21,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_TITLE = "StorCLI GUI"
-APP_VERSION = "1.5.9"
+APP_VERSION = "1.5.10"
 MONO_FONT = ("Consolas", 10)
 UI_FONT = ("Microsoft YaHei UI", 9)
 DANGER_COLOR = "#c62828"
@@ -68,6 +68,21 @@ def base_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def read_bundled_text(name):
+    roots = []
+    if getattr(sys, "_MEIPASS", ""):
+        roots.append(sys._MEIPASS)
+    roots.append(base_dir())
+    for root in dict.fromkeys(roots):
+        path = os.path.join(root, name)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        except OSError:
+            continue
+    return ""
 
 
 def find_storcli():
@@ -1866,6 +1881,15 @@ def apply_menu_item_colors(menu):
             continue
 
 
+def set_widget_enabled(widget, enabled):
+    if widget is None:
+        return
+    try:
+        widget.configure(state="normal" if enabled else "disabled")
+    except tk.TclError:
+        pass
+
+
 def bind_context_menu(widget, build_entries):
     """绑定右键菜单; build_entries() 返回 [(label, cmd), ...], 元素 "-" 表示分隔线."""
     menu = tk.Menu(
@@ -2045,7 +2069,8 @@ class TextTab:
         self.frame = ttk.Frame(parent)
         bar = ttk.Frame(self.frame)
         bar.pack(fill="x", padx=6, pady=6)
-        ttk.Button(bar, text="刷新", command=self.load).pack(side="left")
+        self.refresh_btn = ttk.Button(bar, text="刷新", command=self.load)
+        self.refresh_btn.pack(side="left")
         self.info = ttk.Label(bar, text="", font=UI_FONT)
         self.info.pack(side="left", padx=10)
         self.text_frame, self.text = build_text(self.frame)
@@ -2092,7 +2117,8 @@ class DataTab:
 
     FILTERS = ("全部", "异常", "正常", "在线", "离线", "未配置", "热备", "重建/初始化")
 
-    def __init__(self, parent, app, build_args, buttons=(), hint="双击行查看详情"):
+    def __init__(self, parent, app, build_args, buttons=(),
+                 hint="双击行查看详情", show_export=True):
         self.app = app
         self.build_args = build_args
         self.tables = []
@@ -2112,37 +2138,44 @@ class DataTab:
 
         bar = ttk.Frame(self.frame)
         bar.pack(fill="x", padx=6, pady=(6, 3))
-        ttk.Button(bar, text="刷新", command=self.load).pack(side="left")
+        self.refresh_btn = ttk.Button(bar, text="刷新", command=self.load)
+        self.refresh_btn.pack(side="left")
         style = ttk.Style(self.frame)
         style.configure("Danger.TButton", foreground=DANGER_COLOR)
         for item in buttons:
             kw = {}
             if len(item) > 2 and item[2] == "danger":
                 kw["style"] = "Danger.TButton"
-            button = ttk.Button(bar, text=item[0], command=item[1], **kw)
+            button = ttk.Button(
+                bar, text=item[0], command=item[1], state="disabled", **kw)
             button.pack(side="left", padx=(6, 0))
             self.button_widgets[item[0]] = button
         self.info = ttk.Label(bar, text=hint, font=UI_FONT)
         self.info.pack(side="left", padx=10)
         self.mode_btn = ttk.Button(bar, text="原始输出", command=self.toggle_mode, width=10)
         self.mode_btn.pack(side="right")
-        ttk.Button(bar, text="导出...", command=self.export_table, width=8).pack(
-            side="right", padx=(0, 4))
+        self.export_btn = None
+        if show_export:
+            self.export_btn = ttk.Button(
+                bar, text="导出...", command=self.export_table, width=8)
+            self.export_btn.pack(side="right", padx=(0, 4))
 
         filter_bar = ttk.Frame(self.frame)
         filter_bar.pack(fill="x", padx=6, pady=(0, 4))
         ttk.Label(filter_bar, text="搜索:").pack(side="left")
         self.filter_var = tk.StringVar()
-        filter_entry = ttk.Entry(filter_bar, textvariable=self.filter_var, width=28)
-        filter_entry.pack(side="left", padx=(4, 8))
+        self.filter_entry = ttk.Entry(
+            filter_bar, textvariable=self.filter_var, width=28)
+        self.filter_entry.pack(side="left", padx=(4, 8))
         ttk.Label(filter_bar, text="状态:").pack(side="left")
         self.state_filter_var = tk.StringVar(value="全部")
-        state_filter = ttk.Combobox(
+        self.state_filter = ttk.Combobox(
             filter_bar, textvariable=self.state_filter_var, values=self.FILTERS,
             state="readonly", width=12)
-        state_filter.pack(side="left", padx=4)
-        ttk.Button(filter_bar, text="清空", command=self.clear_filters, width=6).pack(
-            side="left", padx=(4, 8))
+        self.state_filter.pack(side="left", padx=4)
+        self.clear_btn = ttk.Button(
+            filter_bar, text="清空", command=self.clear_filters, width=6)
+        self.clear_btn.pack(side="left", padx=(4, 8))
         self.selection_label = ttk.Label(filter_bar, text="", font=UI_FONT)
         self.selection_label.pack(side="left", padx=4)
         ttk.Label(filter_bar, text=hint, foreground="#666").pack(side="right")
@@ -2163,11 +2196,14 @@ class DataTab:
         self.text_frame.pack_forget()
         self.tree_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.filter_var.trace_add("write", lambda *_: self.refresh_table_view())
-        state_filter.bind("<<ComboboxSelected>>", lambda _e: self.refresh_table_view())
+        self.state_filter.bind(
+            "<<ComboboxSelected>>", lambda _e: self.refresh_table_view())
+        self.update_button_states()
 
     def load(self):
         if self.app.current_ctrl is None:
             self.info.config(text="未选择控制器")
+            self.update_button_states()
             return
         ctrl = self.app.current_ctrl
         if self.loaded_ctrl != ctrl:
@@ -2185,6 +2221,8 @@ class DataTab:
         seq = self._load_seq
         args = self.build_args(ctrl)
         self.info.config(text="加载中: storcli64 " + " ".join(args) + " J")
+        self.update_button_states()
+        self.app.update_data_action_state(self)
 
         def done(res):
             if ctrl != self.app.current_ctrl or seq != self._load_seq:
@@ -2202,6 +2240,8 @@ class DataTab:
             self.show_text(self.raw_text)
             self.show_mode(False)
             self.info.config(text="失败")
+            self.update_button_states()
+            self.app.update_data_action_state(self)
             return
         self.raw_text = res["stdout"]
         if res["stderr"].strip():
@@ -2244,6 +2284,29 @@ class DataTab:
             self.info.config(
                 text=f"{tr_status(status_text) or '完成'} · {brief} · "
                      f"{res['elapsed']:.1f}s · {self.last_refresh}")
+        self.update_button_states()
+        self.app.update_data_action_state(self)
+
+    def update_button_states(self):
+        available = (
+            self.app.current_ctrl is not None
+            and self.loaded_ctrl == self.app.current_ctrl)
+        busy = self.app.operation_active
+        has_tables = bool(self.tables)
+        has_raw = bool(self.raw_text)
+        has_filters = (
+            bool(self.filter_var.get().strip())
+            or self.state_filter_var.get() != "全部")
+        set_widget_enabled(
+            self.refresh_btn, available and not busy)
+        set_widget_enabled(
+            self.mode_btn, has_tables and has_raw)
+        set_widget_enabled(self.export_btn, has_raw)
+        set_widget_enabled(self.clear_btn, has_tables and has_filters)
+        self.filter_entry.configure(
+            state="normal" if has_tables else "disabled")
+        self.state_filter.configure(
+            state="readonly" if has_tables else "disabled")
 
     def show_tables(self, tables):
         self.headers = render_tables(self.tree, tables, row_data=self.row_data,
@@ -2297,6 +2360,7 @@ class DataTab:
         return True
 
     def refresh_table_view(self):
+        self.update_button_states()
         if not self.tables:
             return
         tables = self.visible_tables()
@@ -2445,6 +2509,7 @@ class EventsTab:
         self.loaded_ctrl = None
         self.rows = []
         self.raw_text = ""
+        self.raw_only_mode = False
         self.tree_mode = True
         self.frame = ttk.Frame(parent)
         bar = ttk.Frame(self.frame)
@@ -2452,9 +2517,12 @@ class EventsTab:
         ttk.Label(bar, text="最近").pack(side="left")
         self.count_var = tk.StringVar(value="50")
         ttk.Spinbox(bar, from_=10, to=2000, textvariable=self.count_var, width=6).pack(side="left", padx=4)
-        ttk.Button(bar, text="查询事件", command=self.load).pack(side="left", padx=4)
-        ttk.Button(bar, text="TTY 日志", command=self.load_tty).pack(side="left", padx=4)
-        ttk.Button(bar, text="导出...", command=self.save_log).pack(side="left", padx=4)
+        self.query_btn = ttk.Button(bar, text="查询事件", command=self.load)
+        self.query_btn.pack(side="left", padx=4)
+        self.tty_btn = ttk.Button(bar, text="TTY 日志", command=self.load_tty)
+        self.tty_btn.pack(side="left", padx=4)
+        self.export_btn = ttk.Button(bar, text="导出...", command=self.save_log)
+        self.export_btn.pack(side="left", padx=4)
         self.info = ttk.Label(bar, text="", font=UI_FONT)
         self.info.pack(side="left", padx=10)
         self.view_btn = ttk.Button(bar, text="原始日志", command=self.toggle_mode, width=10)
@@ -2464,16 +2532,18 @@ class EventsTab:
         filter_bar.pack(fill="x", padx=6, pady=(0, 4))
         ttk.Label(filter_bar, text="搜索:").pack(side="left")
         self.filter_var = tk.StringVar()
-        ttk.Entry(filter_bar, textvariable=self.filter_var, width=32).pack(
-            side="left", padx=(4, 8))
+        self.filter_entry = ttk.Entry(
+            filter_bar, textvariable=self.filter_var, width=32)
+        self.filter_entry.pack(side="left", padx=(4, 8))
         ttk.Label(filter_bar, text="级别:").pack(side="left")
         self.severity_var = tk.StringVar(value="全部")
-        severity = ttk.Combobox(
+        self.severity = ttk.Combobox(
             filter_bar, textvariable=self.severity_var, values=self.SEVERITIES,
             state="readonly", width=8)
-        severity.pack(side="left", padx=4)
-        ttk.Button(filter_bar, text="清空", command=self.clear_filters, width=6).pack(
-            side="left", padx=4)
+        self.severity.pack(side="left", padx=4)
+        self.clear_btn = ttk.Button(
+            filter_bar, text="清空", command=self.clear_filters, width=6)
+        self.clear_btn.pack(side="left", padx=4)
         self.count_label = ttk.Label(filter_bar, text="", font=UI_FONT)
         self.count_label.pack(side="left", padx=8)
 
@@ -2501,7 +2571,9 @@ class EventsTab:
         self.text_frame.pack_forget()
         self.tree_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.filter_var.trace_add("write", lambda *_: self.render_events())
-        severity.bind("<<ComboboxSelected>>", lambda _e: self.render_events())
+        self.severity.bind(
+            "<<ComboboxSelected>>", lambda _e: self.render_events())
+        self.update_button_states()
 
     def load(self):
         if self.app.current_ctrl is None:
@@ -2541,29 +2613,62 @@ class EventsTab:
         self.loaded_ctrl = ctrl
         self.rows = []
         self.raw_text = ""
+        self.raw_only_mode = False
         self.tree.delete(*self.tree.get_children())
         self.text.delete("1.0", "end")
+        self.count_label.config(text="")
         if ctrl is not None:
             self.text.insert("end", "控制器已切换，请重新查询事件日志。")
+        self.update_button_states()
 
     def on_done(self, res, raw_only=False):
         if not res.get("ok"):
+            self.raw_only_mode = False
             self.raw_text = f"[错误] {res.get('error', '')}"
             self.show_text(self.raw_text)
             self.show_mode(False)
             self.info.config(text="失败")
+            self.update_button_states()
             return
         self.raw_text = res.get("stdout", "") or ""
         if (res.get("stderr") or "").strip():
             self.raw_text += "\n--- stderr ---\n" + res["stderr"]
+        self.raw_only_mode = raw_only
         self.rows = [] if raw_only else self.parse_events(self.raw_text)
-        if self.rows:
+        if raw_only:
+            self.render_raw_log()
+            self.show_mode(False)
+        elif self.rows:
             self.render_events()
             self.show_mode(True)
         else:
             self.show_text(self.raw_text or "(无输出)")
             self.show_mode(False)
         self.info.config(text=f"{res['elapsed']:.1f}s · {time.strftime('%H:%M:%S')}")
+        self.update_button_states()
+
+    def update_button_states(self):
+        available = (
+            self.app.current_ctrl is not None
+            and self.loaded_ctrl == self.app.current_ctrl)
+        busy = self.app.operation_active
+        has_data = bool(self.rows or self.raw_text)
+        has_filters = (
+            bool(self.filter_var.get().strip())
+            or self.severity_var.get() != "全部")
+        set_widget_enabled(
+            self.query_btn, available and not busy)
+        set_widget_enabled(
+            self.tty_btn, available and not busy)
+        set_widget_enabled(self.export_btn, has_data)
+        set_widget_enabled(
+            self.view_btn, has_data and not self.raw_only_mode and bool(self.rows))
+        set_widget_enabled(
+            self.clear_btn, has_data and has_filters)
+        self.filter_entry.configure(
+            state="normal" if has_data else "disabled")
+        self.severity.configure(
+            state="readonly" if has_data else "disabled")
 
     @staticmethod
     def severity_for(text):
@@ -2640,6 +2745,9 @@ class EventsTab:
         return rows
 
     def render_events(self):
+        if self.raw_only_mode:
+            self.render_raw_log()
+            return
         self.tree.delete(*self.tree.get_children())
         query = self.filter_var.get().strip().lower()
         severity = self.severity_var.get()
@@ -2655,6 +2763,30 @@ class EventsTab:
                              tags=(tag,) if tag else ())
             shown += 1
         self.count_label.config(text=f"显示 {shown}/{len(self.rows)} 条")
+        self.update_button_states()
+
+    def render_raw_log(self):
+        query = self.filter_var.get().strip().casefold()
+        severity = self.severity_var.get()
+        lines = self.raw_text.splitlines()
+        if not query and severity == "全部":
+            shown = lines
+        else:
+            shown = [
+                line for line in lines
+                if (not query or query in line.casefold())
+                and (severity == "全部"
+                     or self.severity_for(line) == severity)
+            ]
+        if shown:
+            self.show_text("\n".join(shown))
+        elif query or severity != "全部":
+            self.show_text("(没有匹配的 TTY 日志行)")
+        else:
+            self.show_text("(无输出)")
+        self.count_label.config(
+            text=f"显示 {len(shown)}/{len(lines)} 行")
+        self.update_button_states()
 
     def clear_filters(self):
         self.filter_var.set("")
@@ -2677,6 +2809,10 @@ class EventsTab:
             self.view_btn.config(text="表格视图")
 
     def toggle_mode(self):
+        if self.raw_only_mode:
+            self.render_raw_log()
+            self.show_mode(False)
+            return
         if self.tree_mode:
             self.show_text(self.raw_text or "(尚未查询事件)")
             self.show_mode(False)
@@ -2717,18 +2853,31 @@ class ConsoleTab:
         self.entry.bind("<Return>", lambda _e: self.run())
         self.entry.bind("<Up>", self.hist_prev)
         self.entry.bind("<Down>", self.hist_next)
+        self.entry.bind("<KeyRelease>", lambda _e: self.update_button_states())
+        self.entry.bind(
+            "<<Paste>>",
+            lambda _e: self.entry.after_idle(self.update_button_states),
+            add="+")
         bind_context_menu(self.entry, lambda: [
             ("粘贴", lambda: self.entry.event_generate("<<Paste>>")),
             ("清空", lambda: self.entry.delete(0, "end"))])
         self.json_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="JSON", variable=self.json_var).pack(side="left")
-        ttk.Button(bar, text="执行", command=self.run).pack(side="left", padx=(6, 0))
+        self.run_btn = ttk.Button(
+            bar, text="执行", command=self.run, state="disabled")
+        self.run_btn.pack(side="left", padx=(6, 0))
         self.text_frame, self.text = build_text(self.frame)
         self.append("直接输入 StorCLI 参数并回车执行, 例如:\n"
                     "  /call show\n"
                     "  /c0 show all\n"
                     "  /c0/eall/sall show\n"
                     "  help\n")
+
+    def update_button_states(self):
+        set_widget_enabled(
+            self.run_btn,
+            bool(self.entry.get().strip())
+            and not self.app.operation_active)
 
     def append(self, s):
         self.text.insert("end", s)
@@ -2751,6 +2900,7 @@ class ConsoleTab:
         self.hist_idx = len(self.history)
         self.append(f"\n{'-' * 72}\nstorcli64 {line}\n{'-' * 72}\n")
         self.entry.delete(0, "end")
+        self.update_button_states()
         self.app.run_cmd(args, self.on_done, timeout=DEFAULT_TIMEOUT)
 
     def on_done(self, res):
@@ -2761,6 +2911,7 @@ class ConsoleTab:
         else:
             self.append(f"[错误] {res.get('error', '')}")
         self.append(f"\n({res.get('elapsed', 0):.1f}s)\n")
+        self.update_button_states()
 
     def hist_prev(self, _e):
         if not self.history or self.hist_idx <= 0:
@@ -4030,10 +4181,13 @@ class OverviewTab:
         self.frame = ttk.Frame(parent)
         bar = ttk.Frame(self.frame)
         bar.pack(fill="x", padx=6, pady=6)
-        ttk.Button(bar, text="刷新", command=self.load).pack(side="left")
+        self.refresh_btn = ttk.Button(bar, text="刷新", command=self.load)
+        self.refresh_btn.pack(side="left")
         self.info = ttk.Label(bar, text="", font=UI_FONT)
         self.info.pack(side="left", padx=10)
-        self.mode_btn = ttk.Button(bar, text="原始输出", command=self.toggle_mode, width=10)
+        self.mode_btn = ttk.Button(
+            bar, text="原始输出", command=self.toggle_mode,
+            width=10, state="disabled")
         self.mode_btn.pack(side="right")
 
         self.dash = ttk.Frame(self.frame)
@@ -4094,7 +4248,8 @@ class OverviewTab:
             relief="flat", borderwidth=0, background=WINDOW_BG,
             foreground="#1565c0", activebackground=HOVER_BG,
             activeforeground="#1565c0", cursor="hand2",
-            font=(UI_FONT[0], UI_FONT[1], "underline"))
+            font=(UI_FONT[0], UI_FONT[1], "underline"),
+            state="disabled")
         self.bg_more_btn.pack(anchor="w", padx=10, pady=(2, 8))
 
         af = ttk.LabelFrame(self.dash, text="高级软件选项")
@@ -4108,14 +4263,18 @@ class OverviewTab:
 
         xf = ttk.LabelFrame(self.dash, text="快捷操作")
         xf.grid(row=1, column=1, sticky="nsew", padx=3, pady=(0, 6))
+        self.quick_buttons = []
         for i, (text, cmd) in enumerate([
                 ("创建虚拟驱动器", self.app.create_vd),
                 ("控制器固件更新...", self.app.ctrl_fw),
                 ("物理盘固件更新...", self.app.pd_fw),
                 ("关闭报警", self.app.op_alarm_off),
                 ("重新检测控制器", self.app.op_rescan)]):
-            ttk.Button(xf, text=text, command=cmd).grid(
+            button = ttk.Button(
+                xf, text=text, command=cmd, state="disabled")
+            button.grid(
                 row=i, column=0, sticky="w", padx=8, pady=1)
+            self.quick_buttons.append(button)
 
         vf = ttk.LabelFrame(self.dash, text="固件版本信息")
         vf.grid(row=1, column=2, sticky="nsew", padx=(3, 0), pady=(0, 6))
@@ -4140,10 +4299,12 @@ class OverviewTab:
         self.text_frame, self.text = build_text(self.frame)
         self.text_frame.pack_forget()
         self._bg_refresh_job = self.app.root.after(10000, self._background_tick)
+        self.update_button_states()
 
     def load(self):
         if self.app.current_ctrl is None:
             self.info.config(text="未选择控制器")
+            self.update_button_states()
             return
         ctrl = self.app.current_ctrl
         self.fw_build_time = ""
@@ -4189,6 +4350,7 @@ class OverviewTab:
         self._load_seq += 1
         seq = self._load_seq
         self.info.config(text="加载中...")
+        self.update_button_states()
         self.app.run_cmd([f"/c{ctrl}", "show", "all", "J"],
                          lambda res: self._main_done(res, ctrl, seq),
                          timeout=DEFAULT_TIMEOUT, ctrl=ctrl,
@@ -4197,6 +4359,21 @@ class OverviewTab:
 
     def _request_is_current(self, ctrl, seq):
         return ctrl == self.app.current_ctrl and seq == self._load_seq
+
+    def update_button_states(self):
+        available = (
+            self.app.current_ctrl is not None
+            and self.loaded_ctrl == self.app.current_ctrl)
+        busy = self.app.operation_active
+        set_widget_enabled(
+            self.refresh_btn,
+            self.app.current_ctrl is not None and not busy)
+        set_widget_enabled(
+            self.mode_btn, self._rd is not None and bool(self.raw_text))
+        for button in self.quick_buttons:
+            set_widget_enabled(button, available and not busy)
+        set_widget_enabled(
+            self.bg_more_btn, available and bool(self._bg_snapshot))
 
     def _main_done(self, res, ctrl, seq):
         if ctrl != self.app.current_ctrl or seq != self._load_seq:
@@ -4218,6 +4395,7 @@ class OverviewTab:
             self.show_text(self.raw_text)
             self.show_mode(False)
             self.info.config(text="失败")
+            self.update_button_states()
             return
         rd = {}
         status_text = ""
@@ -4232,6 +4410,7 @@ class OverviewTab:
             self.show_text(self.raw_text)
             self.show_mode(False)
             self.info.config(text=f"{res['elapsed']:.1f}s")
+            self.update_button_states()
             return
         self._rd = rd
         self._rd_ctrl = ctrl
@@ -4259,6 +4438,7 @@ class OverviewTab:
         self.info.config(
             text=f"{tr_status(status_text) or '成功'} · {res['elapsed']:.1f}s · "
                  f"{time.strftime('%H:%M:%S')}")
+        self.update_button_states()
         self._run_aux(
             [f"/c{ctrl}", "show", "all"], ctrl, seq,
             lambda aux_res: self.on_raw(aux_res, ctrl, seq))
@@ -4384,6 +4564,7 @@ class OverviewTab:
                                       self.bg_vd_note, vd_entries)
         self._update_background_group("pd", self.bg_pd_lbl, self.bg_pd_bar,
                                       self.bg_pd_note, pd_entries)
+        self.update_button_states()
 
     def _update_background_group(self, kind, label, bar, note, entries):
         caption = "虚拟盘进行中操作" if kind == "vd" else "物理盘进行中操作"
@@ -4672,6 +4853,7 @@ class OverviewTab:
                 self.raw_text += "\n--- stderr ---\n" + res["stderr"]
             if not self.tree_mode:
                 self.show_text(self.raw_text)
+            self.update_button_states()
 
     def on_termlog(self, res, ctrl, seq):
         if (not self._request_is_current(ctrl, seq)
@@ -4786,7 +4968,8 @@ class ControllerTab:
 
         bar = ttk.Frame(self.frame)
         bar.pack(fill="x", padx=6, pady=6)
-        ttk.Button(bar, text="刷新", command=self.load).pack(side="left")
+        self.refresh_btn = ttk.Button(bar, text="刷新", command=self.load)
+        self.refresh_btn.pack(side="left")
         self.filter_label = ttk.Label(bar, text="筛选:")
         self.filter_label.pack(side="left", padx=(10, 4))
         self.filter_var = tk.StringVar()
@@ -4870,7 +5053,9 @@ class ControllerTab:
 
         raw_bar = ttk.Frame(self.raw_page)
         raw_bar.pack(fill="x", padx=6, pady=(6, 0))
-        ttk.Button(raw_bar, text="另存为...", command=self.save_raw).pack(side="left")
+        self.save_raw_btn = ttk.Button(
+            raw_bar, text="另存为...", command=self.save_raw, state="disabled")
+        self.save_raw_btn.pack(side="left")
         self.text_frame, self.text = build_text(self.raw_page)
 
         bind_context_menu(self.tree, lambda: [
@@ -4882,10 +5067,12 @@ class ControllerTab:
         ])
         self.filter_var.trace_add("write", lambda *_: self.render_details())
         self.on_view_changed()
+        self.update_button_states()
 
     def load(self):
         if self.app.current_ctrl is None:
             self.info.config(text="未选择控制器")
+            self.update_button_states()
             return
         ctrl = self.app.current_ctrl
         if self.loaded_ctrl != ctrl:
@@ -4903,6 +5090,7 @@ class ControllerTab:
         self._load_seq += 1
         seq = self._load_seq
         self.info.config(text="加载中...")
+        self.update_button_states()
         args = [f"/c{ctrl}", "show", "all", "J"]
         self.app.run_cmd(
             args, lambda res: self._on_result(res, ctrl, seq),
@@ -4911,13 +5099,25 @@ class ControllerTab:
                 c != self.app.current_ctrl or s != self._load_seq)
 
     def on_view_changed(self, _event=None):
+        self.update_button_states()
+
+    def update_button_states(self):
+        available = (
+            self.app.current_ctrl is not None
+            and self.loaded_ctrl == self.app.current_ctrl)
         try:
             detail_active = self.view_nb.index(self.view_nb.select()) == 1
         except Exception:
             detail_active = False
-        state = "normal" if detail_active else "disabled"
-        self.filter_entry.configure(state=state)
-        self.filter_label.configure(foreground="" if detail_active else "#999")
+        detail_available = (
+            detail_active and available and bool(self.records))
+        set_widget_enabled(
+            self.refresh_btn, available and not self.app.operation_active)
+        set_widget_enabled(self.save_raw_btn, bool(self.raw_text))
+        self.filter_entry.configure(
+            state="normal" if detail_available else "disabled")
+        self.filter_label.configure(
+            foreground="" if detail_available else "#999")
 
     def _on_result(self, res, ctrl, seq):
         if ctrl != self.app.current_ctrl or seq != self._load_seq:
@@ -4927,6 +5127,7 @@ class ControllerTab:
             self.show_text(self.raw_text)
             self.view_nb.select(self.raw_page)
             self.info.config(text="读取失败")
+            self.update_button_states()
             return
         self.raw_text = res.get("stdout", "") or ""
         if (res.get("stderr") or "").strip():
@@ -4944,6 +5145,7 @@ class ControllerTab:
             self.show_text(self.raw_text or "(无输出)")
             self.view_nb.select(self.raw_page)
             self.info.config(text=f"{tr_status(status_text) or '解析失败'} · {res['elapsed']:.1f}s")
+            self.update_button_states()
             return
         self.records = self.collect_records(rd)
         self.update_summary(rd)
@@ -4954,6 +5156,7 @@ class ControllerTab:
         self.info.config(
             text=f"{tr_status(status_text) or '成功'} · {res['elapsed']:.1f}s · "
                  f"{len(self.records)} 项 · {time.strftime('%H:%M:%S')}")
+        self.update_button_states()
 
     @staticmethod
     def find_first(node, names):
@@ -5792,9 +5995,13 @@ class App:
                   foreground="#555").pack(side="left", padx=(6, 8))
         ttk.Button(topbar, text="设置...", command=self.edit_storcli_path).pack(side="left")
         ttk.Button(topbar, text="打开目录", command=self.open_folder).pack(side="left", padx=(6, 0))
-        ttk.Button(topbar, text="刷新控制器", command=self.refresh_controllers).pack(side="left", padx=(8, 0))
-        ttk.Button(topbar, text="刷新全部", command=self.reload_tabs).pack(
-            side="left", padx=(6, 0))
+        self.refresh_ctrl_btn = ttk.Button(
+            topbar, text="刷新控制器", command=self.refresh_controllers)
+        self.refresh_ctrl_btn.pack(side="left", padx=(8, 0))
+        self.refresh_all_btn = ttk.Button(
+            topbar, text="刷新全部", command=self.reload_tabs,
+            state="disabled")
+        self.refresh_all_btn.pack(side="left", padx=(6, 0))
         if is_admin():
             ttk.Label(topbar, text="● 管理员", foreground="#0a7d32", font=UI_FONT).pack(side="left", padx=10)
         else:
@@ -5846,7 +6053,7 @@ class App:
             ("开始重建", self.pd_rebuild_start),
             ("停止重建", self.pd_rebuild_stop),
             ("置为正常 (Good)", self.pd_set_good, "danger"),
-        ))
+        ), show_export=False)
         self.tab_encl = DataTab(self.nb, self, lambda n: [f"/c{n}/eall", "show"], buttons=(
             ("详情", self.encl_details),
         ))
@@ -5918,6 +6125,7 @@ class App:
             ("详情", self.encl_details),
             ("复制行", lambda: self._copy_tree_row(self.tab_encl.tree))])
         self.build_menu()
+        self.update_all_button_states()
 
     def build_menu(self):
         menubar = tk.Menu(self.root)
@@ -6016,11 +6224,13 @@ class App:
         self.operation_active = True
         self.operation_title = title
         self.status_var.set(f"操作进行中: {title}")
+        self.update_all_button_states()
         return True
 
     def end_operation(self):
         self.operation_active = False
         self.operation_title = ""
+        self.update_all_button_states()
         if self.pending == 0:
             self.status_var.set("就绪")
 
@@ -6070,6 +6280,7 @@ class App:
         self.controllers = []
         self.controller_health = {}
         self.current_ctrl = None
+        self.update_all_button_states()
         self.sidebar.delete(*self.sidebar.get_children())
         self.ctrl_info_var.set("正在检测控制器...")
         self.banner(None)
@@ -6162,6 +6373,7 @@ class App:
         self.current_ctrl = first
         self.ctrl_info_var.set(f"共发现 {len(found)} 个控制器")
         self.reload_tabs()
+        self.update_all_button_states()
 
     def refresh_controller_healths(self, found, seq):
         for cid, _model in found:
@@ -6209,12 +6421,14 @@ class App:
         self.close_battery_summary()
         self.current_ctrl = cid
         self.reload_tabs()
+        self.update_all_button_states()
 
     def reload_tabs(self):
         self.tab_events.prepare_controller(self.current_ctrl)
         for tab in (self.tab_overview, self.tab_ctrl, self.tab_vd,
                     self.tab_pd, self.tab_encl):
             tab.load()
+        self.update_all_button_states()
 
     def schedule_auto_refresh(self):
         if self._auto_refresh_job is not None:
@@ -6247,6 +6461,10 @@ class App:
         self.schedule_auto_refresh()
 
     def update_data_action_state(self, tab):
+        valid = (
+            self.current_ctrl is not None
+            and tab.loaded_ctrl == self.current_ctrl
+            and not self.operation_active)
         selection = tab.tree.selection()
         row = tab.row_data.get(selection[0]) if selection else None
         state = str(tab.row_state(row)).lower() if row else ""
@@ -6279,7 +6497,24 @@ class App:
         elif tab is self.tab_encl:
             enabled = {"详情": bool(row)}
         for label, widget in tab.button_widgets.items():
-            widget.configure(state="normal" if enabled.get(label, False) else "disabled")
+            set_widget_enabled(
+                widget, valid and enabled.get(label, False))
+        if hasattr(tab, "update_button_states"):
+            tab.update_button_states()
+
+    def update_all_button_states(self):
+        set_widget_enabled(
+            getattr(self, "refresh_ctrl_btn", None),
+            not self.operation_active)
+        set_widget_enabled(
+            getattr(self, "refresh_all_btn", None),
+            self.current_ctrl is not None and not self.operation_active)
+        for tab in getattr(self, "tabs", []):
+            update = getattr(tab, "update_button_states", None)
+            if update:
+                update()
+        for tab in (self.tab_vd, self.tab_pd, self.tab_encl):
+            self.update_data_action_state(tab)
 
     def tab_double_click(self, tab):
         if tab is self.tab_pd:
@@ -7201,12 +7436,58 @@ class App:
 
     def about(self):
         exe = self.path_var.get().strip() or "(未找到)"
-        messagebox.showinfo(
-            "关于", f"{APP_TITLE} v{APP_VERSION}\n\nBroadcom MegaRAID StorCLI 的图形化前端。\n"
-                    f"StorCLI: {exe}\nPython: {sys.version.split()[0]}\n\n"
-                    "所有操作最终转换为 storcli 命令执行, 可在结果窗口中查看完整命令。\n"
-                    "Made By Windy He",
-            parent=self.root)
+        license_text = read_bundled_text("LICENSE") or (
+            "Apache License\nVersion 2.0, January 2004\n"
+            "http://www.apache.org/licenses/\n\n"
+            "The full license text is distributed in the LICENSE file.")
+        win = tk.Toplevel(self.root)
+        win.title(f"关于 {APP_TITLE} v{APP_VERSION}")
+        win.geometry("860x680")
+        win.minsize(680, 520)
+        win.transient(self.root)
+
+        body = ttk.Frame(win)
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+        ttk.Label(
+            body, text=f"{APP_TITLE} v{APP_VERSION}",
+            font=(UI_FONT[0], UI_FONT[1] + 5, "bold")).pack(anchor="w")
+        ttk.Label(
+            body, text="Broadcom MegaRAID StorCLI 的图形化前端",
+            foreground="#555").pack(anchor="w", pady=(2, 8))
+        info = ttk.LabelFrame(body, text="程序信息", padding=(8, 6))
+        info.pack(fill="x")
+        ttk.Label(info, text=f"StorCLI: {exe}", wraplength=790).pack(anchor="w")
+        ttk.Label(
+            info, text=f"Python: {sys.version.split()[0]}").pack(
+                anchor="w", pady=(2, 0))
+        ttk.Label(
+            info,
+            text=("所有操作最终转换为 storcli 命令执行，"
+                  "可在结果窗口中查看完整命令。"),
+            wraplength=790).pack(anchor="w", pady=(2, 0))
+        ttk.Label(info, text="Made By Windy He").pack(
+            anchor="w", pady=(2, 0))
+
+        license_frame = ttk.LabelFrame(
+            body, text="许可证 - Apache License 2.0", padding=6)
+        license_frame.pack(fill="both", expand=True, pady=(8, 0))
+        text_frame, text = build_text(license_frame)
+        text_frame.pack(fill="both", expand=True)
+        text.insert("1.0", license_text)
+        text.config(state="disabled")
+
+        actions = ttk.Frame(body)
+        actions.pack(fill="x", pady=(8, 0))
+
+        def copy_license():
+            win.clipboard_clear()
+            win.clipboard_append(license_text)
+
+        ttk.Button(
+            actions, text="复制许可证", command=copy_license).pack(side="left")
+        ttk.Button(
+            actions, text="关闭", command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda _e: win.destroy())
 
     def _copy_tree_row(self, tree):
         sel = tree.selection()
