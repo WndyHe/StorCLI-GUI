@@ -15,8 +15,8 @@ Download a StorCLI version compatible with your controller and place
 - Localized controller detail view with searchable properties and raw JSON.
 - Live virtual-drive and physical-drive background-operation progress bars with
   10-second refresh and an MSM-style **More Details** view.
-- MSM-style BBU/CacheVault summary and advanced-property windows.
-- MSM-style **Modify Drive Group** support with RAID migration, member-drive
+- BBU/CacheVault summary and advanced-property windows.
+- Modify drive group support with RAID migration, member-drive
   addition, disk-count-aware RAID choices and capacity expansion.
 - Physical drive actions: locate, rebuild, state changes, hot spare, SMART,
   error counters and firmware update.
@@ -27,7 +27,7 @@ Download a StorCLI version compatible with your controller and place
 
 ## Requirements
 
-- Windows 7/8/8.1/10/11 x64 or Windows Server 2008 R2 x64 to Windows Server 2025 x64
+- Windows Client 7/8/8.1/10/11 x64 or Windows Server 2008 R2 x64 to Windows Server 2025 x64
 - Administrator privileges for controller discovery and management.
 - A compatible Broadcom `storcli64.exe` binary.
 
