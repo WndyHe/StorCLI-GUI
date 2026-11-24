@@ -34,6 +34,15 @@ and adds the full license to the About window.
 - The event-log search field now filters TTY raw-log lines in place, including
   severity filtering and matching-line counts.
 
+### Release
+
+- Official Windows builds use Python 3.15 and Tk 9.0.
+- Windows executable SHA256:
+  `AFE4D7ED16828797E33B753616FF63A265FFB2F44B2D28808FEAB3482B12DC26`.
+- Requires a supported Windows x64 system and administrator privileges.
+- Requires a compatible Broadcom `storcli64.exe`, which is supplied separately;
+  this release does not include or redistribute StorCLI.
+
 ## [1.5.9] - 2026-11-23
 
 This update adds live background-operation progress to the overview dashboard,
