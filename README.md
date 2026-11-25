@@ -22,6 +22,8 @@ Download a StorCLI version compatible with your controller and place
   error counters and firmware update.
 - Searchable tables with state filters, horizontal scrolling, sorting and CSV export.
 - Structured controller event view with severity filters and raw-log fallback.
+- Compact top menu with global utilities, while device and controller actions
+  stay on their contextual right-click menus.
 - Dangerous-operation mutex, controller context protection and long-task progress.
 - Administrator elevation manifest and light/dark-safe Windows redraw handling.
 
@@ -36,12 +38,19 @@ Download a StorCLI version compatible with your controller and place
 1. Download `StorCLI_GUI.exe` from the latest GitHub Release.
 2. Place it in a writable directory.
 3. Put a compatible `storcli64.exe` in the same directory, or choose its path in
-   the GUI's **StorCLI: Settings...** dialog.
+   the GUI's **配置...** dialog.
 4. Run `StorCLI_GUI.exe` and accept the administrator permission prompt.
 
 The GUI displays the exact StorCLI command and raw output for every operation.
 Review the target controller, enclosure and slot before confirming any operation
 that changes controller configuration or overwrites data.
+
+## Configuration
+
+The **配置...** dialog stores the StorCLI path, automatic-refresh preference,
+refresh interval and top menu-bar visibility. Settings are written to
+`storcli_gui_config.json` beside the executable or source file. The dialog can
+open that directory directly.
 
 ## Run from source
 

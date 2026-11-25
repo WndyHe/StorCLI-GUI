@@ -12,6 +12,31 @@ All notable changes to StorCLI GUI are documented here. The format follows
 
 No unreleased changes.
 
+## [1.6.0] - 2026-11-25
+
+This feature release adds persistent configuration, streamlines the top menu,
+and completes the remaining scheduled-task localization.
+
+### Added
+
+- A unified configuration dialog for the StorCLI path, automatic refresh,
+  refresh interval and top menu-bar visibility.
+- Configuration is saved by default to `storcli_gui_config.json` beside the
+  executable or source file.
+
+### Changed
+
+- Removed the redundant raw-output hint from empty Virtual Drives and Physical
+  Drives pages.
+- Streamlined the top menu bar to **杂项** and **帮助**; device and controller
+  operations remain available from their contextual right-click menus.
+
+### Fixed
+
+- Completed Chinese localization for scheduled-task fields including the next
+  consistency-check launch, next patrol-read launch and next battery-learning
+  time.
+
 ## [1.5.10] - 2026-11-24
 
 This maintenance release improves log searching and page action-state handling,
@@ -312,7 +337,8 @@ MSM-style BBU/CacheVault information, and multi-controller refresh hardening.
 - Controller discovery, overview dashboard, VD/PD/enclosure tables, event log,
   command console and firmware update workflows.
 
-[Unreleased]: https://github.com/WndyHe/StorCLI-GUI/compare/v1.5.10...HEAD
+[Unreleased]: https://github.com/WndyHe/StorCLI-GUI/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.6.0
 [1.5.10]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.10
 [1.5.9]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.9
 [1.5.8]: https://github.com/WndyHe/StorCLI-GUI/releases/tag/v1.5.8

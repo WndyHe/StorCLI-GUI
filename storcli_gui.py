@@ -21,7 +21,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_TITLE = "StorCLI GUI"
-APP_VERSION = "1.5.10"
+APP_VERSION = "1.6.0"
 MONO_FONT = ("Consolas", 10)
 UI_FONT = ("Microsoft YaHei UI", 9)
 DANGER_COLOR = "#c62828"
@@ -34,6 +34,7 @@ HOVER_BG = "#dbeafe"
 ATTENTION_COLOR = "#b8860b"
 CREATE_NO_WINDOW = 0x08000000
 DEFAULT_TIMEOUT = 180
+CONFIG_FILENAME = "storcli_gui_config.json"
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -83,6 +84,50 @@ def read_bundled_text(name):
         except OSError:
             continue
     return ""
+
+
+def default_app_config():
+    return {
+        "config_version": 1,
+        "storcli_path": "",
+        "auto_refresh": False,
+        "auto_refresh_seconds": 30,
+        "show_menubar": True,
+    }
+
+
+def app_config_path():
+    return os.path.join(base_dir(), CONFIG_FILENAME)
+
+
+def load_app_config(path):
+    config = default_app_config()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return config
+    if not isinstance(stored, dict):
+        return config
+    config["storcli_path"] = str(stored.get("storcli_path", "") or "")
+    config["auto_refresh"] = bool(stored.get("auto_refresh", False))
+    try:
+        seconds = int(stored.get("auto_refresh_seconds", 30))
+    except (TypeError, ValueError):
+        seconds = 30
+    config["auto_refresh_seconds"] = max(10, min(3600, seconds))
+    config["show_menubar"] = bool(stored.get("show_menubar", True))
+    return config
+
+
+def save_app_config(path, config):
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.replace(temporary, path)
 
 
 def find_storcli():
@@ -1709,6 +1754,11 @@ for mapping in (CONTROLLER_SECTION_CN, CONTROLLER_PROP_CN):
         CONTROLLER_NORMALIZED_CN.setdefault(
             normalize_controller_key(source), translated)
 
+PROP_NORMALIZED_CN = {
+    normalize_controller_key(source): translated
+    for source, translated in PROP_CN.items()
+}
+
 
 def tr_prop(k):
     return PROP_CN.get(k, k)
@@ -1733,6 +1783,8 @@ def tr_controller_prop(key):
     normalized = normalize_controller_key(text)
     if normalized in CONTROLLER_NORMALIZED_CN:
         return CONTROLLER_NORMALIZED_CN[normalized]
+    if normalized in PROP_NORMALIZED_CN:
+        return PROP_NORMALIZED_CN[normalized]
     for prefix, translated in (
             ("Support ", "支持 "), ("Deny ", "禁止 "),
             ("Force ", "强制 "), ("Enable ", "启用 "), ("Disable ", "禁用 "),
@@ -2118,7 +2170,8 @@ class DataTab:
     FILTERS = ("全部", "异常", "正常", "在线", "离线", "未配置", "热备", "重建/初始化")
 
     def __init__(self, parent, app, build_args, buttons=(),
-                 hint="双击行查看详情", show_export=True):
+                 hint="双击行查看详情", show_export=True,
+                 show_raw_hint=True):
         self.app = app
         self.build_args = build_args
         self.tables = []
@@ -2133,6 +2186,7 @@ class DataTab:
         self.last_status = ""
         self.last_refresh = ""
         self.hint = hint
+        self.show_raw_hint = show_raw_hint
         self.button_widgets = {}
         self.frame = ttk.Frame(parent)
 
@@ -2271,9 +2325,15 @@ class DataTab:
             except Exception:
                 desc = ""
             if desc and desc != "None":
-                self.friendly_text = (f"状态: {tr_status(status_text) or '-'}\n说明: {tr_desc(desc)}\n\n"
-                                      "该页当前没有数据。\n"
-                                      "点右上「原始输出」可查看 storcli 原始返回。")
+                lines = [
+                    f"状态: {tr_status(status_text) or '-'}",
+                    f"说明: {tr_desc(desc)}",
+                    "",
+                    "该页当前没有数据。",
+                ]
+                if self.show_raw_hint:
+                    lines.append("点右上「原始输出」可查看 storcli 原始返回。")
+                self.friendly_text = "\n".join(lines)
                 self.show_text(self.friendly_text)
             else:
                 self.friendly_text = ""
@@ -5857,8 +5917,14 @@ class App:
         self.controller_refresh_seq = 0
         self.operation_active = False
         self.operation_title = ""
-        self.auto_refresh_var = tk.BooleanVar(value=False)
-        self.auto_refresh_seconds = tk.StringVar(value="30")
+        self.config_path = app_config_path()
+        self.config = load_app_config(self.config_path)
+        self.show_menubar = bool(self.config.get("show_menubar", True))
+        self.menubar = None
+        self.auto_refresh_var = tk.BooleanVar(
+            value=bool(self.config.get("auto_refresh", False)))
+        self.auto_refresh_seconds = tk.StringVar(
+            value=str(self.config.get("auto_refresh_seconds", 30)))
         self._auto_refresh_job = None
         self._window_was_minimized = False
         self._restore_redraw_job = None
@@ -5977,23 +6043,32 @@ class App:
                   anchor="w").pack(side="left", padx=8, pady=3)
         ttk.Label(statusbar, text="F5 刷新当前页", font=UI_FONT,
                   foreground="#666").pack(side="right", padx=8)
-        ttk.Spinbox(
+        self.auto_refresh_spin = ttk.Spinbox(
             statusbar, from_=10, to=3600, width=6,
-            textvariable=self.auto_refresh_seconds).pack(side="right", padx=(2, 0))
+            textvariable=self.auto_refresh_seconds)
+        self.auto_refresh_spin.pack(side="right", padx=(2, 0))
+        self.auto_refresh_spin.bind(
+            "<FocusOut>", self.on_auto_refresh_changed)
+        self.auto_refresh_spin.bind(
+            "<Return>", self.on_auto_refresh_changed)
         ttk.Label(statusbar, text="秒", font=UI_FONT).pack(side="right")
         ttk.Checkbutton(
             statusbar, text="自动刷新", variable=self.auto_refresh_var,
-            command=self.schedule_auto_refresh).pack(side="right", padx=(12, 2))
+            command=self.on_auto_refresh_changed).pack(side="right", padx=(12, 2))
         topbar = ttk.Frame(root)
         topbar.pack(side="top", fill="x", padx=8, pady=(8, 2))
         ttk.Label(topbar, text="StorCLI:").pack(side="left")
-        self.path_var = tk.StringVar(value=find_storcli())
-        initial_path = self.path_var.get().strip()
+        configured_path = str(self.config.get("storcli_path", "") or "").strip()
+        initial_path = (
+            configured_path if os.path.isfile(configured_path)
+            else find_storcli())
+        self.path_var = tk.StringVar(value=initial_path)
+        self.last_path = initial_path
         self.path_short_var = tk.StringVar(
             value=os.path.basename(initial_path) if initial_path else "未找到")
         ttk.Label(topbar, textvariable=self.path_short_var, font=MONO_FONT,
                   foreground="#555").pack(side="left", padx=(6, 8))
-        ttk.Button(topbar, text="设置...", command=self.edit_storcli_path).pack(side="left")
+        ttk.Button(topbar, text="配置...", command=self.open_settings).pack(side="left")
         ttk.Button(topbar, text="打开目录", command=self.open_folder).pack(side="left", padx=(6, 0))
         self.refresh_ctrl_btn = ttk.Button(
             topbar, text="刷新控制器", command=self.refresh_controllers)
@@ -6045,7 +6120,7 @@ class App:
             ("初始化(全)", lambda: self.vd_init("full"), "danger"),
             ("删除", self.vd_delete, "danger"),
             ("新建...", self.create_vd),
-        ))
+        ), show_raw_hint=False)
         self.tab_pd = DataTab(self.nb, self, lambda n: [f"/c{n}/eall/sall", "show"], buttons=(
             ("详情", self.pd_details),
             ("定位灯 开", self.pd_locate_on),
@@ -6053,7 +6128,7 @@ class App:
             ("开始重建", self.pd_rebuild_start),
             ("停止重建", self.pd_rebuild_stop),
             ("置为正常 (Good)", self.pd_set_good, "danger"),
-        ), show_export=False)
+        ), show_export=False, show_raw_hint=False)
         self.tab_encl = DataTab(self.nb, self, lambda n: [f"/c{n}/eall", "show"], buttons=(
             ("详情", self.encl_details),
         ))
@@ -6129,62 +6204,25 @@ class App:
 
     def build_menu(self):
         menubar = tk.Menu(self.root)
-        ops = tk.Menu(menubar, tearoff=0)
-        ops.add_command(label="重新检测控制器", command=self.op_rescan)
-        ops.add_separator()
-        ops.add_command(label="开始巡检", command=self.op_patrol_start)
-        ops.add_command(label="停止巡检", command=self.op_patrol_stop)
-        ops.add_command(label="巡检状态", command=self.op_patrol_show)
-        ops.add_separator()
-        ops.add_command(label="查看外来配置", command=self.op_foreign_show)
-        ops.add_command(label="导入外来配置", command=self.op_foreign_import, foreground=DANGER_COLOR)
-        ops.add_command(label="删除外来配置", command=self.op_foreign_del, foreground=DANGER_COLOR)
-        ops.add_separator()
-        ops.add_command(label="BBU / CacheVault 信息...", command=self.op_bbu)
-        ops.add_command(label="控制器固件更新...", command=self.ctrl_fw, foreground=DANGER_COLOR)
-        ops.add_command(label="报警状态", command=self.op_alarm_show)
-        ops.add_command(label="开启报警", command=self.op_alarm_on)
-        ops.add_command(label="关闭报警", command=self.op_alarm_off)
-        ops.add_separator()
-        ops.add_command(label="清除控制器全部配置 (危险!)", command=self.op_clear_config, foreground=DANGER_COLOR)
-        menubar.add_cascade(label="控制器操作", menu=ops)
-        pdm = tk.Menu(menubar, tearoff=0)
-        pdm.add_command(label="详情", command=self.pd_details)
-        pdm.add_command(label="定位灯 开", command=self.pd_locate_on)
-        pdm.add_command(label="定位灯 关", command=self.pd_locate_off)
-        pdm.add_command(label="开始重建", command=self.pd_rebuild_start)
-        pdm.add_command(label="停止重建", command=self.pd_rebuild_stop)
-        pdstate = tk.Menu(pdm, tearoff=0)
-        pdstate.add_command(label="置为在线 (Online)", command=self.pd_set_online)
-        pdstate.add_command(label="置为离线 (Offline)", command=self.pd_set_offline, foreground=DANGER_COLOR)
-        pdstate.add_command(label="置为 Missing", command=self.pd_set_missing, foreground=DANGER_COLOR)
-        pdstate.add_separator()
-        pdstate.add_command(label="转为 JBOD", command=self.pd_set_jbod, foreground=DANGER_COLOR)
-        pdstate.add_command(label="置为正常 (Good)", command=self.pd_set_good, foreground=DANGER_COLOR)
-        pdm.add_cascade(label="状态设置", menu=pdstate)
-        pdm.add_separator()
-        pdm.add_command(label="添加热备盘", command=self.pd_add_hs)
-        pdm.add_command(label="删除热备盘", command=self.pd_del_hs)
-        pdm.add_separator()
-        pdm.add_command(label="SMART 信息", command=self.pd_smart)
-        pdm.add_command(label="错误计数", command=self.pd_errcnt)
-        pdm.add_separator()
-        pdm.add_command(label="固件更新...", command=self.pd_fw)
-        pdm.add_command(label="固件更新进度", command=self.pd_fw_status)
-        menubar.add_cascade(label="物理盘", menu=pdm)
-        vdm = tk.Menu(menubar, tearoff=0)
-        vdm.add_command(label="创建虚拟驱动器...", command=self.create_vd)
-        vdm.add_command(label="虚拟驱动器详情", command=self.vd_details)
-        vdm.add_command(label="修改磁盘组...", command=self.vd_expand)
-        vdm.add_command(label="删除虚拟驱动器...", command=self.vd_delete, foreground=DANGER_COLOR)
-        menubar.add_cascade(label="虚拟驱动器", menu=vdm)
+        self.menubar = menubar
+        misc = tk.Menu(menubar, tearoff=0)
+        misc.add_command(label="配置...", command=self.open_settings)
+        misc.add_separator()
+        misc.add_command(label="打开程序目录", command=self.open_program_folder)
+        misc.add_command(label="打开配置目录", command=self.open_config_folder)
+        misc.add_command(label="打开 StorCLI 目录", command=self.open_folder)
+        menubar.add_cascade(label="杂项", menu=misc)
         helpm = tk.Menu(menubar, tearoff=0)
         helpm.add_command(label="使用帮助", command=self.show_help, accelerator="F1")
-        helpm.add_command(label="打开 StorCLI 所在目录", command=self.open_folder)
         helpm.add_command(label="关于", command=self.about)
         menubar.add_cascade(label="帮助", menu=helpm)
         apply_menu_item_colors(menubar)
-        self.root.config(menu=menubar)
+        self.apply_menubar_visibility()
+
+    def apply_menubar_visibility(self):
+        if self.menubar is None:
+            return
+        self.root.config(menu=self.menubar if self.show_menubar else "")
 
     # -- 命令执行
 
@@ -6445,6 +6483,39 @@ class App:
             seconds = 30
             self.auto_refresh_seconds.set("30")
         self._auto_refresh_job = self.root.after(seconds * 1000, self.run_auto_refresh)
+
+    def on_auto_refresh_changed(self, _event=None):
+        self.schedule_auto_refresh()
+        self.save_config()
+
+    def config_snapshot(self):
+        try:
+            seconds = int(self.auto_refresh_seconds.get())
+        except ValueError:
+            seconds = 30
+        return {
+            "config_version": 1,
+            "storcli_path": self.path_var.get().strip(),
+            "auto_refresh": bool(self.auto_refresh_var.get()),
+            "auto_refresh_seconds": max(10, min(3600, seconds)),
+            "show_menubar": bool(self.show_menubar),
+        }
+
+    def save_config(self, notify=False):
+        self.config = self.config_snapshot()
+        try:
+            save_app_config(self.config_path, self.config)
+            return True
+        except OSError as exc:
+            if notify:
+                messagebox.showerror(
+                    APP_TITLE, f"配置保存失败:\n{exc}", parent=self.root)
+            return False
+
+    def open_config_folder(self):
+        folder = os.path.dirname(self.config_path)
+        if folder and os.path.isdir(folder):
+            os.startfile(folder)
 
     def run_auto_refresh(self):
         self._auto_refresh_job = None
@@ -7284,25 +7355,67 @@ class App:
              "code": 0, "elapsed": 0.0},
             "show ctrlcount J")
 
-    def edit_storcli_path(self):
+    def open_settings(self):
         win = tk.Toplevel(self.root)
-        win.title("StorCLI 设置")
-        win.geometry("720x170")
+        win.title("StorCLI GUI 配置")
+        win.geometry("760x470")
+        win.minsize(680, 430)
         win.transient(self.root)
-        win.resizable(False, False)
+        win.resizable(True, True)
         path_var = tk.StringVar(value=self.path_var.get())
+        refresh_var = tk.BooleanVar(value=self.auto_refresh_var.get())
+        seconds_var = tk.StringVar(value=self.auto_refresh_seconds.get())
+        menubar_var = tk.BooleanVar(value=self.show_menubar)
         body = ttk.Frame(win)
         body.pack(fill="both", expand=True, padx=12, pady=12)
-        ttk.Label(body, text="StorCLI 可执行文件:").pack(anchor="w")
-        row = ttk.Frame(body)
-        row.pack(fill="x", pady=(4, 10))
+
+        storcli_frame = ttk.LabelFrame(body, text="StorCLI", padding=(8, 6))
+        storcli_frame.pack(fill="x")
+        ttk.Label(storcli_frame, text="可执行文件:").pack(anchor="w")
+        row = ttk.Frame(storcli_frame)
+        row.pack(fill="x", pady=(4, 8))
         entry = ttk.Entry(row, textvariable=path_var, font=MONO_FONT)
         entry.pack(side="left", fill="x", expand=True)
+
+        interface_frame = ttk.LabelFrame(body, text="界面", padding=(8, 6))
+        interface_frame.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(
+            interface_frame, text="显示顶部菜单栏",
+            variable=menubar_var).pack(anchor="w")
+        ttk.Label(
+            interface_frame,
+            text=("关闭后仍可通过右键菜单、页面按钮和 F1 使用主要功能。"),
+            foreground="#666").pack(anchor="w", pady=(2, 0))
+
+        refresh_frame = ttk.LabelFrame(body, text="自动刷新", padding=(8, 6))
+        refresh_frame.pack(fill="x", pady=(8, 0))
+        refresh_row = ttk.Frame(refresh_frame)
+        refresh_row.pack(fill="x")
+        ttk.Checkbutton(
+            refresh_row, text="启用自动刷新",
+            variable=refresh_var).pack(side="left")
+        ttk.Label(refresh_row, text="间隔:").pack(side="left", padx=(18, 4))
+        ttk.Spinbox(
+            refresh_row, from_=10, to=3600, width=8,
+            textvariable=seconds_var).pack(side="left")
+        ttk.Label(refresh_row, text="秒").pack(side="left", padx=(4, 0))
+
+        config_frame = ttk.LabelFrame(body, text="配置文件", padding=(8, 6))
+        config_frame.pack(fill="x", pady=(8, 0))
+        ttk.Label(
+            config_frame, text=self.config_path,
+            font=MONO_FONT, wraplength=700,
+            justify="left").pack(anchor="w")
+        ttk.Label(
+            config_frame,
+            text="配置默认保存于程序同一目录。",
+            foreground="#666").pack(anchor="w", pady=(2, 0))
 
         def choose():
             selected = filedialog.askopenfilename(
                 parent=win, title="选择 StorCLI 可执行文件",
-                initialdir=os.path.dirname(path_var.get()) if path_var.get() else base_dir(),
+                initialdir=(os.path.dirname(path_var.get())
+                            if path_var.get() else base_dir()),
                 filetypes=[("可执行文件", "*.exe"), ("所有文件", "*.*")])
             if selected:
                 path_var.set(selected)
@@ -7312,17 +7425,43 @@ class App:
             if not path or not os.path.isfile(path):
                 messagebox.showerror(APP_TITLE, "请选择有效的 StorCLI 可执行文件。", parent=win)
                 return
+            try:
+                seconds = int(seconds_var.get())
+            except ValueError:
+                messagebox.showerror(APP_TITLE, "刷新间隔必须是数字。", parent=win)
+                return
+            if not 10 <= seconds <= 3600:
+                messagebox.showerror(
+                    APP_TITLE, "刷新间隔必须在 10 到 3600 秒之间。", parent=win)
+                return
             self.path_var.set(path)
             self.last_path = path
             self.path_short_var.set(os.path.basename(path))
+            self.auto_refresh_var.set(refresh_var.get())
+            self.auto_refresh_seconds.set(str(seconds))
+            self.show_menubar = bool(menubar_var.get())
+            self.apply_menubar_visibility()
+            self.schedule_auto_refresh()
+            if not self.save_config(notify=True):
+                return
             win.destroy()
             self.refresh_controllers()
 
-        ttk.Button(row, text="浏览...", command=choose).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="浏览...", command=choose).pack(
+            side="left", padx=(6, 0))
         buttons = ttk.Frame(body)
-        buttons.pack(fill="x")
-        ttk.Button(buttons, text="保存并刷新", command=apply).pack(side="right")
-        ttk.Button(buttons, text="取消", command=win.destroy).pack(side="right", padx=8)
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(
+            buttons, text="打开配置目录",
+            command=self.open_config_folder).pack(side="left")
+        ttk.Button(
+            buttons, text="关于", command=self.about).pack(
+                side="left", padx=(6, 0))
+        ttk.Button(
+            buttons, text="保存并应用", command=apply).pack(side="right")
+        ttk.Button(
+            buttons, text="取消", command=win.destroy).pack(
+                side="right", padx=8)
         win.bind("<Return>", lambda _e: apply())
         win.bind("<Escape>", lambda _e: win.destroy())
 
@@ -7365,6 +7504,11 @@ class App:
         if folder and os.path.isdir(folder):
             os.startfile(folder)
 
+    def open_program_folder(self):
+        folder = base_dir()
+        if folder and os.path.isdir(folder):
+            os.startfile(folder)
+
     def show_help(self, _event=None):
         top = tk.Toplevel(self.root)
         top.title("使用帮助")
@@ -7396,7 +7540,7 @@ class App:
             ("h2", "一、概述"),
             ("li", "· 本工具是 Broadcom MegaRAID StorCLI (storcli64.exe) 的图形化前端, 所有操作最终转换为 storcli 命令执行。"),
             ("li", "· 需以管理员权限运行 (exe 已内置 UAC 提权清单)。"),
-            ("li", "· 顶部「设置...」可指定 storcli64.exe 位置；右下角可启用自动刷新并设置间隔。"),
+            ("li", "· 顶部「配置...」可指定 storcli64.exe、自动刷新和顶部菜单栏；配置保存在程序同目录的 storcli_gui_config.json。"),
             ("li", "· F1 打开本帮助, F5 刷新当前页面; 表格支持搜索、状态筛选、排序、导出和右键菜单。"),
             ("h2", "二、页面说明"),
             ("li", "· 概览: 仪表盘式展示控制器属性、容量使用、后台操作、高级软件选项、固件版本与构建时间、物理盘列表。后台操作每 10 秒刷新，可通过「更多详情」查看逐项进度和预计剩余时间。"),
@@ -7522,6 +7666,7 @@ class App:
                 "请等待操作完成后再关闭。",
                 parent=self.root)
             return
+        self.save_config()
         self.cmd_q.put(None)
         self.root.destroy()
 
