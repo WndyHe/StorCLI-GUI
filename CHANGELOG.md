@@ -37,6 +37,15 @@ and completes the remaining scheduled-task localization.
   consistency-check launch, next patrol-read launch and next battery-learning
   time.
 
+### Release
+
+- Official Windows builds use Python 3.15 and Tk 9.0.
+- Windows executable SHA256:
+  `D357B187FAF4A555609929826D6A047DACE31285223BC85090A9768354EA5BE3`.
+- Requires a supported Windows x64 system and administrator privileges.
+- Requires a compatible Broadcom `storcli64.exe`, which is supplied separately;
+  this release does not include or redistribute StorCLI.
+
 ## [1.5.10] - 2026-11-24
 
 This maintenance release improves log searching and page action-state handling,
