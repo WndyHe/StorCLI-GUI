@@ -29,7 +29,7 @@ Download a StorCLI version compatible with your controller and place
 
 ## Requirements
 
-- Windows Client 7/8/8.1/10/11 x64 or Windows Server 2008 R2 x64 to Windows Server 2025 x64
+- Windows Client 8/8.1/10/11 x64 or Windows Server 2012 R2 x64 to Windows Server 2025 x64
 - Administrator privileges for controller discovery and management.
 - A compatible Broadcom `storcli64.exe` binary.
 
